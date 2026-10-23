@@ -2,6 +2,7 @@
 
 use crate::save::Profile;
 use crate::state::{AppState, PauseFlow};
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::audio::{AudioSinkPlayback, Volume};
 use bevy::prelude::*;
 use std::f32::consts::TAU;
@@ -84,10 +85,12 @@ impl PlaySfx {
 
 #[derive(Resource)]
 struct SoundBank {
+    #[cfg(not(target_arch = "wasm32"))]
     sfx: Vec<Handle<AudioSource>>,
     last_played: [f64; SFX_COUNT],
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Component)]
 struct Music;
 
@@ -97,38 +100,45 @@ impl Plugin for AudioFxPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<PlaySfx>()
             .add_systems(Startup, synthesize)
-            .add_systems(Update, (play_sfx, toggle_mute, sync_music_volume));
+            .add_systems(Update, (play_sfx, toggle_mute, sync_music));
     }
 }
 
-fn synthesize(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
-    let mut add = |samples: Vec<f32>| {
-        sources.add(AudioSource {
-            bytes: wav(&samples).into(),
-        })
-    };
-    // Order must match the `Sfx` enum.
+/// Every sound effect (in `Sfx` order) plus the music loop, as raw samples.
+fn render_all() -> (Vec<Vec<f32>>, Vec<f32>) {
     let sfx = vec![
-        add(sfx_shoot()),
-        add(sfx_enemy_shoot()),
-        add(sfx_hit()),
-        add(sfx_explosion(0.55, 7.0, 0.9, 1)),
-        add(sfx_explosion(1.7, 2.4, 0.97, 2)),
-        add(sfx_star()),
-        add(sfx_arpeggio(&[523.3, 659.3, 784.0, 1046.5], 0.085)),
-        add(sfx_hurt()),
-        add(sfx_bomb()),
-        add(sfx_warning()),
-        add(sfx_click()),
-        add(sfx_arpeggio(&[784.0, 987.8, 1174.7, 1568.0, 1975.5], 0.07)),
-        add(sfx_shield()),
-        add(sfx_missile()),
-        add(sfx_denied()),
-        add(sfx_spout()),
-        add(sfx_whale_call()),
+        sfx_shoot(),
+        sfx_enemy_shoot(),
+        sfx_hit(),
+        sfx_explosion(0.55, 7.0, 0.9, 1),
+        sfx_explosion(1.7, 2.4, 0.97, 2),
+        sfx_star(),
+        sfx_arpeggio(&[523.3, 659.3, 784.0, 1046.5], 0.085),
+        sfx_hurt(),
+        sfx_bomb(),
+        sfx_warning(),
+        sfx_click(),
+        sfx_arpeggio(&[784.0, 987.8, 1174.7, 1568.0, 1975.5], 0.07),
+        sfx_shield(),
+        sfx_missile(),
+        sfx_denied(),
+        sfx_spout(),
+        sfx_whale_call(),
     ];
     debug_assert_eq!(sfx.len(), SFX_COUNT);
-    let music = add(music_loop());
+    (sfx, music_loop())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn synthesize(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
+    let (sfx, music) = render_all();
+    let mut add = |samples: &[f32]| {
+        sources.add(AudioSource {
+            bytes: wav(samples).into(),
+        })
+    };
+    let sfx = sfx.iter().map(|s| add(s)).collect();
+    let music = add(&music);
     commands.insert_resource(SoundBank {
         sfx,
         last_played: [-10.0; SFX_COUNT],
@@ -138,6 +148,15 @@ fn synthesize(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
         AudioPlayer(music),
         PlaybackSettings::LOOP.with_volume(Volume::Linear(MUSIC_VOLUME)),
     ));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn synthesize(mut commands: Commands) {
+    let (sfx, music) = render_all();
+    web::store(sfx, music);
+    commands.insert_resource(SoundBank {
+        last_played: [-10.0; SFX_COUNT],
+    });
 }
 
 fn play_sfx(
@@ -162,12 +181,18 @@ fn play_sfx(
             continue;
         }
         bank.last_played[i] = now;
+        #[cfg(not(target_arch = "wasm32"))]
         commands.spawn((
             AudioPlayer(bank.sfx[i].clone()),
             PlaybackSettings::DESPAWN
                 .with_volume(Volume::Linear(base * msg.volume))
                 .with_speed(msg.pitch),
         ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = &mut commands;
+            web::play(i, base * msg.volume, msg.pitch);
+        }
     }
 }
 
@@ -180,13 +205,13 @@ fn toggle_mute(keys: Res<ButtonInput<KeyCode>>, mut profile: ResMut<Profile>) {
 
 /// The music runs at full pace and volume while flying; in menus and while
 /// paused it eases down to a slower, quieter tempo, and glides back up.
-fn sync_music_volume(
+fn sync_music(
     profile: Res<Profile>,
     state: Res<State<AppState>>,
     flow: Res<PauseFlow>,
     time: Res<Time<Real>>,
     mut current: Local<Option<(f32, f32)>>,
-    mut sinks: Query<&mut AudioSink, With<Music>>,
+    #[cfg(not(target_arch = "wasm32"))] mut sinks: Query<&mut AudioSink, With<Music>>,
 ) {
     let playing = *state.get() == AppState::Playing && flow.flying();
     let (want_speed, want_volume) = if playing { (1.0, MUSIC_VOLUME) } else { (0.86, MUSIC_VOLUME * 0.5) };
@@ -195,6 +220,7 @@ fn sync_music_volume(
     let k = 1.0 - (-time.delta_secs() * 1.6).exp();
     *speed += (want_speed - *speed) * k;
     *volume += (want_volume - *volume) * k;
+    #[cfg(not(target_arch = "wasm32"))]
     for mut sink in &mut sinks {
         if (sink.speed() - *speed).abs() > 1e-3 {
             sink.set_speed(*speed);
@@ -202,6 +228,108 @@ fn sync_music_volume(
         if (sink.volume().to_linear() - *volume).abs() > 1e-3 {
             sink.set_volume(Volume::Linear(*volume));
         }
+    }
+    #[cfg(target_arch = "wasm32")]
+    web::set_music(*speed, *volume);
+}
+
+/// Web playback. Browsers (phones especially) only let a page start audio
+/// from inside a touch or click, so the page creates an `AudioContext` on
+/// the first gesture (`window.stormwingAudio`, see `web/index.html`) and the
+/// game plays its synthesised sounds through it. Until then it stays quiet.
+#[cfg(target_arch = "wasm32")]
+mod web {
+    use super::RATE;
+    use std::cell::RefCell;
+    use wasm_bindgen::JsCast;
+    use web_sys::{AudioBuffer, AudioBufferSourceNode, AudioContext, AudioContextState, GainNode};
+
+    struct State {
+        samples: Vec<Vec<f32>>,
+        music: Vec<f32>,
+        ctx: Option<AudioContext>,
+        buffers: Vec<AudioBuffer>,
+        music_node: Option<(AudioBufferSourceNode, GainNode)>,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    }
+
+    pub fn store(samples: Vec<Vec<f32>>, music: Vec<f32>) {
+        STATE.with_borrow_mut(|s| {
+            *s = Some(State {
+                samples,
+                music,
+                ctx: None,
+                buffers: Vec::new(),
+                music_node: None,
+            })
+        });
+    }
+
+    fn page_context() -> Option<AudioContext> {
+        let window = web_sys::window()?;
+        js_sys::Reflect::get(&window, &"stormwingAudio".into())
+            .ok()?
+            .dyn_into::<AudioContext>()
+            .ok()
+    }
+
+    fn buffer(ctx: &AudioContext, samples: &[f32]) -> Option<AudioBuffer> {
+        let buf = ctx.create_buffer(1, samples.len().max(1) as u32, RATE as f32).ok()?;
+        buf.copy_to_channel(samples, 0).ok()?;
+        Some(buf)
+    }
+
+    /// The running audio context, once the page has unlocked one.
+    fn running(state: &mut State) -> Option<AudioContext> {
+        if state.ctx.is_none() {
+            let ctx = page_context()?;
+            state.buffers = state.samples.iter().filter_map(|s| buffer(&ctx, s)).collect();
+            state.ctx = Some(ctx);
+        }
+        let ctx = state.ctx.clone()?;
+        (ctx.state() == AudioContextState::Running).then_some(ctx)
+    }
+
+    fn voice(ctx: &AudioContext, buf: &AudioBuffer, volume: f32, rate: f32, looping: bool) -> Option<(AudioBufferSourceNode, GainNode)> {
+        let src = ctx.create_buffer_source().ok()?;
+        src.set_buffer(Some(buf));
+        src.set_loop(looping);
+        src.playback_rate().set_value(rate);
+        let gain = ctx.create_gain().ok()?;
+        gain.gain().set_value(volume);
+        src.connect_with_audio_node(&gain).ok()?;
+        gain.connect_with_audio_node(&ctx.destination()).ok()?;
+        src.start().ok()?;
+        Some((src, gain))
+    }
+
+    pub fn play(index: usize, volume: f32, rate: f32) {
+        STATE.with_borrow_mut(|s| {
+            let Some(state) = s.as_mut() else { return };
+            let Some(ctx) = running(state) else { return };
+            if let Some(buf) = state.buffers.get(index) {
+                voice(&ctx, buf, volume, rate, false);
+            }
+        });
+    }
+
+    pub fn set_music(rate: f32, volume: f32) {
+        STATE.with_borrow_mut(|s| {
+            let Some(state) = s.as_mut() else { return };
+            let Some(ctx) = running(state) else { return };
+            if state.music_node.is_none() {
+                if let Some(buf) = buffer(&ctx, &state.music) {
+                    state.music_node = voice(&ctx, &buf, volume, rate, true);
+                }
+            }
+            if let Some((src, gain)) = &state.music_node {
+                src.playback_rate().set_value(rate);
+                gain.gain().set_value(volume);
+            }
+        });
     }
 }
 
@@ -595,7 +723,8 @@ fn music_loop() -> Vec<f32> {
     buf.iter().map(|s| (s / peak * 0.85).tanh()).collect()
 }
 
-/// Encodes mono samples as a 16-bit PCM WAV file.
+/// Encodes mono samples as a 16-bit PCM WAV file (desktop playback).
+#[cfg(not(target_arch = "wasm32"))]
 fn wav(samples: &[f32]) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
     let mut b = Vec::with_capacity(44 + data_len as usize);

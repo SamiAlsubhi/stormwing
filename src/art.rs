@@ -55,8 +55,6 @@ pub struct Art {
     pub mat_scorch: Handle<StandardMaterial>,
     /// Surf along coastlines (white, alpha from vertex colours).
     pub mat_foam: Handle<StandardMaterial>,
-    /// Whitecaps drifting over the open sea.
-    pub mat_whitecaps: [Handle<StandardMaterial>; 3],
     /// Surf rolling onto beaches, at increasing opacity.
     pub mat_surf: Vec<Handle<StandardMaterial>>,
     /// Flashing lighthouse lamp.
@@ -151,7 +149,6 @@ fn build_art(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>
     let tex_streak = images.add(textures::streak());
     let water_normal = images.add(textures::water_normal());
     let sand_normal = images.add(textures::sand_normal());
-    let whitecaps = images.add(textures::whitecaps());
     let clouds: Vec<Handle<Image>> = (0..4).map(|i| images.add(textures::cloud(11 + i * 31))).collect();
 
     let mut set = |p: Parts| ModelSet {
@@ -219,9 +216,9 @@ fn build_art(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>
         fx(&tex_disc, Color::linear_rgba(l.red * 0.3, l.green * 0.3, l.blue * 0.3, 1.0), false)
     });
     let mat_power_ring = power_colors.map(|c| fx(&tex_ring, c, true));
-    let mat_cloud = clouds.iter().map(|t| fx(t, Color::srgba(1.0, 1.0, 1.0, 0.85), false)).collect();
-    let mat_cloud_high = clouds.iter().map(|t| fx(t, Color::srgba(1.0, 1.0, 1.0, 0.4), false)).collect();
-    let mat_cloud_shadow = clouds.iter().map(|t| fx(t, Color::srgba(0.0, 0.02, 0.06, 0.32), false)).collect();
+    let mat_cloud = clouds.iter().map(|t| fx(t, Color::srgba(1.0, 1.0, 1.0, 0.42), false)).collect();
+    let mat_cloud_high = clouds.iter().map(|t| fx(t, Color::srgba(1.0, 1.0, 1.0, 0.2), false)).collect();
+    let mat_cloud_shadow = clouds.iter().map(|t| fx(t, Color::srgba(0.0, 0.02, 0.06, 0.16), false)).collect();
     let mat_scorch = fx(&tex_smoke, Color::srgba(0.04, 0.03, 0.02, 0.65), false);
 
     let solid = |color: Color| fx_material(None, color, false);
@@ -322,11 +319,6 @@ fn build_art(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>
         mat_cloud_shadow,
         mat_scorch,
         mat_foam: materials.add(solid(Color::WHITE)),
-        mat_whitecaps: [
-            materials.add(fx_material(Some(whitecaps.clone()), Color::srgba(1.0, 1.0, 1.0, 0.6), false)),
-            materials.add(fx_material(Some(whitecaps.clone()), Color::srgba(1.0, 1.0, 1.0, 0.6), false)),
-            materials.add(fx_material(Some(whitecaps.clone()), Color::srgba(0.88, 0.94, 1.0, 0.5), false)),
-        ],
         mat_surf: (1..=10).map(|i| materials.add(solid(Color::srgba(1.0, 1.0, 1.0, i as f32 / 10.0)))).collect(),
         mat_lamp: materials.add(fx_material(Some(tex_glow.clone()), hdr(5.0, 4.2, 2.6), true)),
         mat_mask: materials.add(solid(Color::srgb(0.01, 0.02, 0.04))),

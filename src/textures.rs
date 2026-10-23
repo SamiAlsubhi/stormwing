@@ -163,18 +163,6 @@ pub fn water_normal() -> Image {
     }))
 }
 
-/// Tileable whitecaps: sparse, wind-streaked foam on the open sea.
-pub fn whitecaps() -> Image {
-    repeating(make(512, 512, false, |u, v| {
-        let (u, v) = (u * 0.5 + 0.5, v * 0.5 + 0.5);
-        // Small, sparse flecks stretched across the wind, with soft edges.
-        let n = fbm_tiled(Vec2::new(u * 12.0, v * 24.0), 61, 4, 12);
-        let fine = fbm_tiled(Vec2::new(u * 40.0, v * 40.0), 67, 2, 40);
-        let a = smoothstep(0.7, 0.8, n) * (0.4 + 0.6 * smoothstep(0.3, 0.7, fine));
-        [1.0, 1.0, 1.0, a]
-    }))
-}
-
 /// Tileable wind-ripple normal map for sand.
 pub fn sand_normal() -> Image {
     let size = 256.0;

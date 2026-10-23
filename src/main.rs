@@ -37,8 +37,7 @@ use common::{MainCamera, ARENA, HALF_H, HALF_W};
 
 fn main() {
     let mut app = App::new();
-    app
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    let default_plugins = DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Stormwing".into(),
                 resolution: (600u32, 900u32).into(),
@@ -50,7 +49,12 @@ fn main() {
                 ..default()
             }),
             ..default()
-        }))
+        });
+    // On the web the game plays sound through its own WebAudio engine, which
+    // can be unlocked from a touch (see audio.rs), instead of Bevy's.
+    #[cfg(target_arch = "wasm32")]
+    let default_plugins = default_plugins.disable::<bevy::audio::AudioPlugin>();
+    app.add_plugins(default_plugins)
         .add_plugins((
             common::CommonPlugin,
             state::StatePlugin,

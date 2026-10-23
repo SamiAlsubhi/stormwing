@@ -51,7 +51,6 @@ const CHUNK_W: f32 = 960.0;
 const CHUNK_H: f32 = 400.0;
 const CHUNK_STEP: f32 = 12.0;
 const WATER_TILE: f32 = 430.0;
-const WHITECAP_TILE: f32 = 520.0;
 
 #[derive(Resource)]
 pub struct Backdrop {
@@ -63,7 +62,6 @@ pub struct Backdrop {
     high_cloud_timer: f32,
     next_chunk: i32,
     water_offset: Vec2,
-    whitecap_offset: Vec2,
     rng: Rng,
 }
 
@@ -130,10 +128,6 @@ struct SurfWave {
     period: f32,
 }
 
-/// The whitecap layer drifting over the sea.
-#[derive(Component)]
-struct Whitecaps;
-
 pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
@@ -147,7 +141,6 @@ impl Plugin for TerrainPlugin {
             high_cloud_timer: 0.0,
             next_chunk: 0,
             water_offset: Vec2::ZERO,
-            whitecap_offset: Vec2::ZERO,
             rng: Rng::new(77),
         })
         .add_systems(Startup, |mut c: Commands, mut m: ResMut<Assets<Mesh>>, art: Res<Art>, mut b: ResMut<Backdrop>, q: Query<Entity, With<BackdropItem>>, mut gs: ResMut<GroundScroll>| {
@@ -189,7 +182,6 @@ fn reset(
     commands.insert_resource(ClearColor(theme_def.sky));
     scroll.distance = 0.0;
     backdrop.water_offset = Vec2::ZERO;
-    backdrop.whitecap_offset = Vec2::ZERO;
 
     match theme_def.kind {
         TerrainKind::Desert => {
@@ -207,15 +199,7 @@ fn reset(
                     BackdropItem,
                 ));
             }
-            commands.spawn((
-                Whitecaps,
-                Mesh3d(meshes.add(Rectangle::new(2600.0, 3800.0))),
-                MeshMaterial3d(art.mat_whitecaps[backdrop.theme].clone()),
-                Transform::from_xyz(0.0, 0.0, z::WATER + 0.2),
-                NotShadowCaster,
-                NotShadowReceiver,
-                BackdropItem,
-            ));
+
             commands.spawn((
                 Mesh3d(art.quad.clone()),
                 MeshMaterial3d(art.mat_floor[backdrop.theme].clone()),
@@ -347,13 +331,13 @@ fn spawn_scenery(
 
     b.cloud_timer -= dt;
     if b.cloud_timer <= 0.0 {
-        b.cloud_timer = b.rng.range(4.0, 8.0);
+        b.cloud_timer = b.rng.range(7.0, 12.0);
         let p = Vec2::new(b.rng.range(-HALF_W, HALF_W), HALF_H + 300.0);
         spawn_cloud(&mut commands, &art, &mut b.rng, p, true);
     }
     b.high_cloud_timer -= dt;
     if b.high_cloud_timer <= 0.0 {
-        b.high_cloud_timer = b.rng.range(3.0, 6.0);
+        b.high_cloud_timer = b.rng.range(5.0, 9.0);
         let p = Vec2::new(b.rng.range(-HALF_W, HALF_W), HALF_H + 320.0);
         spawn_cloud(&mut commands, &art, &mut b.rng, p, false);
     }
@@ -372,23 +356,15 @@ fn animate_surface(
         return;
     }
     // The surface moves exactly with the ground (so islands sit in the sea)
-    // plus a slow swell of its own; whitecaps drift with the wind.
+    // plus a slow swell of its own.
     let ground = scroll.0 * dt;
     b.water_offset += Vec2::new(0.018 * dt, -ground / WATER_TILE - 0.012 * dt);
-    b.whitecap_offset += Vec2::new(-0.01 * dt, -ground / WHITECAP_TILE - 0.028 * dt);
-    let (water, caps) = (b.water_offset, b.whitecap_offset);
+    let water = b.water_offset;
     if let Some(mut mat) = materials.get_mut(&art.mat_water[b.theme]) {
         mat.uv_transform = Affine2::from_scale_angle_translation(
             Vec2::new(2600.0 / WATER_TILE, 3800.0 / WATER_TILE),
             0.0,
             water,
-        );
-    }
-    if let Some(mut mat) = materials.get_mut(&art.mat_whitecaps[b.theme]) {
-        mat.uv_transform = Affine2::from_scale_angle_translation(
-            Vec2::new(2600.0 / WHITECAP_TILE, 3800.0 / WHITECAP_TILE),
-            0.0,
-            caps,
         );
     }
 }

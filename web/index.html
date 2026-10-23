@@ -75,43 +75,43 @@
   <script type="module">
     import init from './stormwing.js';
 
-    // Mobile browsers keep Web Audio suspended unless it is resumed inside a
-    // touch or click handler, but the game creates its AudioContext later,
-    // asynchronously. Track every context and resume it on each gesture.
-    const audioContexts = [];
-    const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
-    if (NativeAudioContext) {
-      class TrackedAudioContext extends NativeAudioContext {
-        constructor(...args) {
-          super(...args);
-          audioContexts.push(this);
+    // Phones only let a page start audio from inside a touch, click or key
+    // press. So the game's AudioContext is created right here, on the first
+    // gesture, and the game (audio.rs) plays its sounds through it.
+    let audio = null;
+    let speechUnlocked = false;
+    const unlockAudio = () => {
+      if (document.hidden) return;
+      if (!audio) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          audio = new AC();
+          window.stormwingAudio = audio;
+          // iOS: a tiny silent sound inside the gesture fully wakes audio up.
+          const silence = audio.createBuffer(1, 1, 22050);
+          const src = audio.createBufferSource();
+          src.buffer = silence;
+          src.connect(audio.destination);
+          src.start(0);
         }
       }
-      window.AudioContext = TrackedAudioContext;
-      window.webkitAudioContext = TrackedAudioContext;
-    }
-    let speechUnlocked = false;
-    const resumeAudio = () => {
-      if (document.hidden) return;
-      for (const ctx of audioContexts) {
-        if (ctx.state !== 'running') ctx.resume().catch(() => {});
-      }
+      if (audio && audio.state !== 'running') audio.resume().catch(() => {});
       // iOS only allows speech after it has been started from a gesture once.
       if (!speechUnlocked && window.speechSynthesis) {
         speechUnlocked = true;
         try { speechSynthesis.speak(new SpeechSynthesisUtterance('')); } catch (_) {}
       }
     };
-    for (const type of ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown', 'keydown']) {
-      document.addEventListener(type, resumeAudio, { capture: true, passive: true });
+    for (const type of ['touchend', 'pointerup', 'mouseup', 'click', 'keydown']) {
+      document.addEventListener(type, unlockAudio, { capture: true, passive: true });
     }
     // Silence everything while the page is in the background.
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
-        for (const ctx of audioContexts) ctx.suspend().catch(() => {});
+        if (audio) audio.suspend().catch(() => {});
         if (window.speechSynthesis) speechSynthesis.cancel();
-      } else {
-        resumeAudio();
+      } else if (audio) {
+        audio.resume().catch(() => {});
       }
     });
     // iOS: play through the media channel so the silent switch doesn't mute it.
@@ -169,7 +169,6 @@
         // winit stops the event loop by throwing; that one is expected.
         if (!String(e).includes('Using exceptions for control flow')) throw e;
       }
-      resumeAudio();
     } catch (e) {
       status.textContent = `Could not load the game: ${e}`;
       console.error(e);
