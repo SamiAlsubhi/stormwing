@@ -144,6 +144,24 @@
     for (const type of ['touchend', 'pointerup', 'mouseup', 'click', 'keydown']) {
       document.addEventListener(type, unlockAudio, { capture: true, passive: true });
     }
+    // On iOS, speaking (the voice callouts, and the silent phrase that
+    // unlocks them) pauses the page's audio and doesn't restart it. So
+    // restart it when speech ends, and keep a watchdog for any other
+    // interruption.
+    const restartAudio = () => {
+      if (audio && !document.hidden && audio.state !== 'running') audio.resume().catch(() => {});
+    };
+    if (window.speechSynthesis) {
+      const speak = speechSynthesis.speak.bind(speechSynthesis);
+      speechSynthesis.speak = (utterance) => {
+        utterance.addEventListener('start', restartAudio);
+        utterance.addEventListener('end', restartAudio);
+        utterance.addEventListener('error', restartAudio);
+        speak(utterance);
+        setTimeout(restartAudio, 60);
+      };
+    }
+    setInterval(restartAudio, 400);
     // Silence everything while the page is in the background.
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
