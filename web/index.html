@@ -87,6 +87,34 @@
   <script type="module">
     import init from './stormwing.js';
 
+    // Mobile browsers keep Web Audio suspended unless it is resumed inside a
+    // touch or click handler, but the game creates its AudioContext later,
+    // asynchronously. Track every context and resume it on each gesture.
+    const audioContexts = [];
+    const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
+    if (NativeAudioContext) {
+      class TrackedAudioContext extends NativeAudioContext {
+        constructor(...args) {
+          super(...args);
+          audioContexts.push(this);
+        }
+      }
+      window.AudioContext = TrackedAudioContext;
+      window.webkitAudioContext = TrackedAudioContext;
+    }
+    const resumeAudio = () => {
+      for (const ctx of audioContexts) {
+        if (ctx.state !== 'running') ctx.resume().catch(() => {});
+      }
+    };
+    for (const type of ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown', 'keydown']) {
+      document.addEventListener(type, resumeAudio, { capture: true, passive: true });
+    }
+    // iOS: play through the media channel so the silent switch doesn't mute it.
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    } catch (_) {}
+
     const overlay = document.getElementById('overlay');
     const fill = document.getElementById('fill');
     const status = document.getElementById('status');
@@ -135,6 +163,9 @@
           // winit stops the event loop by throwing; that one is expected.
           if (!String(e).includes('Using exceptions for control flow')) throw e;
         }
+        // The game's AudioContext exists now; nudge it while the tap still counts.
+        resumeAudio();
+        setTimeout(resumeAudio, 250);
       }, { once: true });
     } catch (e) {
       status.textContent = `Could not load the game: ${e}`;

@@ -32,4 +32,6 @@ codegen-units = 1
 [profile.wasm-release]
 inherits = "release"
 opt-level = "s"
-strip = "debuginfo"
+lto = "fat"
+panic = "abort"
+strip = true

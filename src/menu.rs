@@ -54,7 +54,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(AppState::StageSelect), spawn_stage_select)
             .add_systems(OnEnter(AppState::Hangar), spawn_hangar_screen)
             .add_systems(OnEnter(AppState::Results), spawn_results)
-            .add_systems(Update, (style_buttons, menu_keys, bob_menu_plane, scale_ui))
+            .add_systems(Update, (style_buttons, menu_keys, bob_menu_plane, scale_ui, tap_buttons))
             .add_observer(on_activate);
     }
 }
@@ -221,6 +221,25 @@ fn style_buttons(
             bg.0 = color;
         }
         border.set_all(edge);
+    }
+}
+
+/// Finger taps activate buttons straight from the touch position. A tap is a
+/// brand-new pointer with no hover history, which UI picking can miss.
+fn tap_buttons(
+    mut commands: Commands,
+    touches: Res<Touches>,
+    windows: Query<&Window>,
+    buttons: Query<(Entity, &ComputedNode, &UiGlobalTransform, &InheritedVisibility), With<Action>>,
+) {
+    let scale = windows.single().map(|w| w.scale_factor()).unwrap_or(1.0);
+    for touch in touches.iter_just_released() {
+        let (start, end) = (touch.start_position() * scale, touch.position() * scale);
+        for (entity, node, transform, visible) in &buttons {
+            if visible.get() && node.contains_point(*transform, start) && node.contains_point(*transform, end) {
+                commands.trigger(Activate { entity });
+            }
+        }
     }
 }
 
@@ -613,10 +632,18 @@ fn on_activate(
     hangar: Query<Entity, With<HangarRoot>>,
     mut sfx: MessageWriter<PlaySfx>,
     mut exit: MessageWriter<AppExit>,
+    time: Res<Time<Real>>,
+    mut last: Local<Option<(Entity, f64)>>,
 ) {
     let Ok((&action, disabled)) = actions.get(ev.entity) else {
         return;
     };
+    // A tap can be reported by both picking and `tap_buttons`; act once.
+    let now = time.elapsed_secs_f64();
+    if last.is_some_and(|(e, t)| e == ev.entity && now - t < 0.35) {
+        return;
+    }
+    *last = Some((ev.entity, now));
     if disabled {
         sfx.write(PlaySfx::new(Sfx::Denied));
         return;
