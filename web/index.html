@@ -118,7 +118,6 @@
     // press. So the game's AudioContext is created right here, on the first
     // gesture, and the game (audio.rs) plays its sounds through it.
     let audio = null;
-    let speechUnlocked = false;
     const unlockAudio = () => {
       if (document.hidden) return;
       if (!audio) {
@@ -135,38 +134,20 @@
         }
       }
       if (audio && audio.state !== 'running') audio.resume().catch(() => {});
-      // iOS only allows speech after it has been started from a gesture once.
-      if (!speechUnlocked && window.speechSynthesis) {
-        speechUnlocked = true;
-        try { speechSynthesis.speak(new SpeechSynthesisUtterance('')); } catch (_) {}
-      }
     };
     for (const type of ['touchend', 'pointerup', 'mouseup', 'click', 'keydown']) {
       document.addEventListener(type, unlockAudio, { capture: true, passive: true });
     }
-    // On iOS, speaking (the voice callouts, and the silent phrase that
-    // unlocks them) pauses the page's audio and doesn't restart it. So
-    // restart it when speech ends, and keep a watchdog for any other
-    // interruption.
+    // iOS can interrupt the page's audio (a call, Siri, another app) and
+    // not restart it, so keep a watchdog that wakes it back up.
     const restartAudio = () => {
       if (audio && !document.hidden && audio.state !== 'running') audio.resume().catch(() => {});
     };
-    if (window.speechSynthesis) {
-      const speak = speechSynthesis.speak.bind(speechSynthesis);
-      speechSynthesis.speak = (utterance) => {
-        utterance.addEventListener('start', restartAudio);
-        utterance.addEventListener('end', restartAudio);
-        utterance.addEventListener('error', restartAudio);
-        speak(utterance);
-        setTimeout(restartAudio, 60);
-      };
-    }
     setInterval(restartAudio, 400);
     // Silence everything while the page is in the background.
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         if (audio) audio.suspend().catch(() => {});
-        if (window.speechSynthesis) speechSynthesis.cancel();
       } else if (audio) {
         audio.resume().catch(() => {});
       }

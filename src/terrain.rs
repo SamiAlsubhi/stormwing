@@ -109,18 +109,6 @@ struct WhaleFin {
     side: f32,
 }
 
-/// A lighthouse's rotating beam.
-#[derive(Component)]
-struct LighthouseBeam {
-    speed: f32,
-}
-
-/// The lighthouse lamp, flashing as the beam sweeps round.
-#[derive(Component)]
-struct LighthouseLamp {
-    beam: Entity,
-}
-
 /// A band of surf rolling in towards an island's shore.
 #[derive(Component)]
 struct SurfWave {
@@ -160,7 +148,7 @@ impl Plugin for TerrainPlugin {
         )
         .add_systems(
             Update,
-            (spawn_scenery, animate_surface, follow_ground, sweep_beams, flash_lamps, roll_surf, swim_whales, flex_whales),
+            (spawn_scenery, animate_surface, follow_ground, roll_surf, swim_whales, flex_whales),
         );
     }
 }
@@ -519,29 +507,6 @@ fn roll_surf(
         if mat.0 != art.mat_surf[level] {
             mat.0 = art.mat_surf[level].clone();
         }
-    }
-}
-
-/// Lamps flash each time one of the beams sweeps past the viewer.
-fn flash_lamps(
-    time: Res<Time>,
-    beams: Query<&Transform, (With<LighthouseBeam>, Without<LighthouseLamp>)>,
-    mut lamps: Query<(&LighthouseLamp, &mut Transform), Without<LighthouseBeam>>,
-) {
-    let pulse = 1.0 + 0.15 * (time.elapsed_secs() * 9.0).sin();
-    for (lamp, mut t) in &mut lamps {
-        let Ok(beam) = beams.get(lamp.beam) else { continue };
-        let dir = (beam.rotation * Vec3::Y).truncate();
-        // Brightest when a beam points down the screen, towards the viewer.
-        let facing = dir.dot(Vec2::NEG_Y).abs().powf(8.0);
-        let size = (22.0 + 70.0 * facing) * pulse;
-        t.scale = Vec3::new(size, size, 1.0);
-    }
-}
-
-fn sweep_beams(time: Res<Time>, mut q: Query<(&LighthouseBeam, &mut Transform)>) {
-    for (beam, mut t) in &mut q {
-        t.rotate_z(beam.speed * time.delta_secs());
     }
 }
 
@@ -1114,41 +1079,6 @@ fn spawn_island_entity(
             ))
             .id();
         crate::common::attach_model_parts(commands, tower, &art.lighthouse, art);
-        let lantern = at.extend(h + 39.0);
-        let beam = commands
-            .spawn((
-                Mesh3d(art.beam.clone()),
-                MeshMaterial3d(art.mat_beam.clone()),
-                Transform::from_translation(lantern).with_rotation(Quat::from_rotation_z(rng.range(0.0, TAU))),
-                LighthouseBeam { speed: rng.range(0.9, 1.4) },
-                NotShadowCaster,
-                NotShadowReceiver,
-                ChildOf(id),
-            ))
-            .id();
-        commands.spawn((
-            Mesh3d(art.quad.clone()),
-            MeshMaterial3d(art.mat_lamp.clone()),
-            Transform::from_translation(lantern + Vec3::Z * 4.0).with_scale(Vec3::new(30.0, 30.0, 1.0)),
-            LighthouseLamp { beam },
-            NotShadowCaster,
-            NotShadowReceiver,
-            ChildOf(id),
-        ));
-        // A real warm light that washes over the island and the water
-        // (desktop only: it keeps the web build's shaders lighter).
-        #[cfg(not(target_arch = "wasm32"))]
-        commands.spawn((
-            PointLight {
-                color: Color::srgb(1.0, 0.85, 0.6),
-                intensity: 1.2e8,
-                range: 240.0,
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            Transform::from_translation(lantern),
-            ChildOf(id),
-        ));
     }
     id
 }

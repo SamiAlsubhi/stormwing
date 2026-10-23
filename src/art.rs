@@ -57,8 +57,6 @@ pub struct Art {
     pub mat_foam: Handle<StandardMaterial>,
     /// Surf rolling onto beaches, at increasing opacity.
     pub mat_surf: Vec<Handle<StandardMaterial>>,
-    /// Flashing lighthouse lamp.
-    pub mat_lamp: Handle<StandardMaterial>,
     pub mat_mask: Handle<StandardMaterial>,
 
     /// 1x1 quad facing the camera, scaled per use (particles, bullets, clouds).
@@ -94,9 +92,6 @@ pub struct Art {
     pub ice_chunks: Vec<Handle<Mesh>>,
     /// Letters of the 3D title, each with its x offset.
     pub title_letters: Vec<(Handle<Mesh>, f32)>,
-    /// Twin sweeping light beams for lighthouses.
-    pub beam: Handle<Mesh>,
-    pub mat_beam: Handle<StandardMaterial>,
 
     pub tex_glow: Handle<Image>,
     pub tex_smoke: Handle<Image>,
@@ -184,7 +179,6 @@ fn build_art(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>
     let big_star = mesh(star_model(1.6));
     let icons = [mesh(icon_weapon()), mesh(icon_shield()), mesh(icon_repair()), mesh(icon_bomb())];
     let quad = meshes.add(Rectangle::new(1.0, 1.0));
-    let beam = meshes.add(beam_model().build());
     let ice_chunks = (0..8).map(|i| meshes.add(ice_chunk(i).build())).collect();
     let title_letters = title_models()
         .into_iter()
@@ -320,7 +314,6 @@ fn build_art(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>
         mat_scorch,
         mat_foam: materials.add(solid(Color::WHITE)),
         mat_surf: (1..=10).map(|i| materials.add(solid(Color::srgba(1.0, 1.0, 1.0, i as f32 / 10.0)))).collect(),
-        mat_lamp: materials.add(fx_material(Some(tex_glow.clone()), hdr(5.0, 4.2, 2.6), true)),
         mat_mask: materials.add(solid(Color::srgb(0.01, 0.02, 0.04))),
 
         quad,
@@ -350,8 +343,6 @@ fn build_art(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>
         whale_fins,
         ice_chunks,
         title_letters,
-        beam,
-        mat_beam: materials.add(fx_material(None, Color::WHITE, true)),
 
         tex_glow,
         tex_smoke,
@@ -725,7 +716,6 @@ fn lighthouse() -> Parts {
     p.paint.cuboid(Vec3::new(14.0, 4.0, 1.0), Vec3::new(13.0, 10.0, 10.0), rgb(0.88, 0.85, 0.78));
     p.paint.roof(Vec3::new(14.0, 4.0, 6.0), Vec2::new(15.0, 12.0), 5.0, red);
     p.glass.cylinder(Vec3::new(0.0, 0.0, 35.6), Vec3::new(0.0, 0.0, 41.0), 3.7, 12, glass(GLASS_BLUE), false);
-    p.glow.ellipsoid(Vec3::new(0.0, 0.0, 38.4), Vec3::splat(2.8), hdr(4.5, 3.8, 2.0), false);
     p
 }
 
@@ -925,29 +915,6 @@ fn ice_chunk(i: u64) -> Model {
     } else {
         let mut jitter = crate::rng::Rng::new(900 + i);
         m.rock(Vec3::ZERO, Vec3::new(1.0, 0.85, 0.7), rgb(0.8, 0.92, 0.99), move || jitter.range(0.7, 1.15));
-    }
-    m
-}
-
-/// Two opposite fans of light, bright at the lantern and fading outwards.
-fn beam_model() -> Model {
-    let mut m = Model::new();
-    // A wide soft glow and a narrow bright core for each of the two beams.
-    for (reach, spread, glow) in [(330.0, 0.13, [2.6, 2.3, 1.5, 0.5]), (300.0, 0.045, [5.0, 4.4, 3.0, 0.75])] {
-        for side in [0.0, std::f32::consts::PI] {
-            let centre = m.vertex(Vec3::ZERO, Vec3::Z, glow);
-            let steps = 8;
-            let mut prev = None;
-            for i in 0..=steps {
-                let a = side - spread + 2.0 * spread * i as f32 / steps as f32;
-                let p = Vec2::from_angle(a + FRAC_PI_2) * reach;
-                let v = m.vertex(p.extend(0.0), Vec3::Z, [glow[0], glow[1], glow[2], 0.0]);
-                if let Some(prev) = prev {
-                    m.triangle(centre, prev, v);
-                }
-                prev = Some(v);
-            }
-        }
     }
     m
 }

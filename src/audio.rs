@@ -2,12 +2,13 @@
 
 use crate::save::Profile;
 use crate::state::{AppState, PauseFlow};
+use crate::voice::VoiceState;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::audio::{AudioSinkPlayback, Volume};
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
-const RATE: u32 = 44_100;
+pub(crate) const RATE: u32 = 44_100;
 const MUSIC_VOLUME: f32 = 0.42;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -209,8 +210,10 @@ fn sync_music(
     profile: Res<Profile>,
     state: Res<State<AppState>>,
     flow: Res<PauseFlow>,
+    voice: Res<VoiceState>,
     time: Res<Time<Real>>,
     mut current: Local<Option<(f32, f32)>>,
+    mut duck: Local<Option<f32>>,
     #[cfg(not(target_arch = "wasm32"))] mut sinks: Query<&mut AudioSink, With<Music>>,
 ) {
     let playing = *state.get() == AppState::Playing && flow.flying();
@@ -220,17 +223,23 @@ fn sync_music(
     let k = 1.0 - (-time.delta_secs() * 1.6).exp();
     *speed += (want_speed - *speed) * k;
     *volume += (want_volume - *volume) * k;
+    // Dip the music quickly under a voice callout, and bring it back gently.
+    let want_duck = if voice.speaking(time.elapsed_secs_f64()) { 0.45 } else { 1.0 };
+    let duck = duck.get_or_insert(1.0);
+    let rate = if want_duck < *duck { 9.0 } else { 2.2 };
+    *duck += (want_duck - *duck) * (1.0 - (-time.delta_secs() * rate).exp());
+    let volume = *volume * *duck;
     #[cfg(not(target_arch = "wasm32"))]
     for mut sink in &mut sinks {
         if (sink.speed() - *speed).abs() > 1e-3 {
             sink.set_speed(*speed);
         }
-        if (sink.volume().to_linear() - *volume).abs() > 1e-3 {
-            sink.set_volume(Volume::Linear(*volume));
+        if (sink.volume().to_linear() - volume).abs() > 1e-3 {
+            sink.set_volume(Volume::Linear(volume));
         }
     }
     #[cfg(target_arch = "wasm32")]
-    web::set_music(*speed, *volume);
+    web::set_music(*speed, volume);
 }
 
 /// Web playback. Browsers (phones especially) only let a page start audio
@@ -238,18 +247,22 @@ fn sync_music(
 /// the first gesture (`window.stormwingAudio`, see `web/index.html`) and the
 /// game plays its synthesised sounds through it. Until then it stays quiet.
 #[cfg(target_arch = "wasm32")]
-mod web {
+pub(crate) mod web {
     use super::RATE;
     use std::cell::RefCell;
     use wasm_bindgen::JsCast;
     use web_sys::{AudioBuffer, AudioBufferSourceNode, AudioContext, AudioContextState, GainNode};
 
+    #[derive(Default)]
     struct State {
         samples: Vec<Vec<f32>>,
         music: Vec<f32>,
+        voices: Vec<Vec<f32>>,
         ctx: Option<AudioContext>,
         buffers: Vec<AudioBuffer>,
+        voice_buffers: Vec<AudioBuffer>,
         music_node: Option<(AudioBufferSourceNode, GainNode)>,
+        voice_node: Option<AudioBufferSourceNode>,
     }
 
     thread_local! {
@@ -258,14 +271,14 @@ mod web {
 
     pub fn store(samples: Vec<Vec<f32>>, music: Vec<f32>) {
         STATE.with_borrow_mut(|s| {
-            *s = Some(State {
-                samples,
-                music,
-                ctx: None,
-                buffers: Vec::new(),
-                music_node: None,
-            })
+            let state = s.get_or_insert_with(State::default);
+            state.samples = samples;
+            state.music = music;
         });
+    }
+
+    pub fn store_voices(voices: Vec<Vec<f32>>) {
+        STATE.with_borrow_mut(|s| s.get_or_insert_with(State::default).voices = voices);
     }
 
     fn page_context() -> Option<AudioContext> {
@@ -287,6 +300,7 @@ mod web {
         if state.ctx.is_none() {
             let ctx = page_context()?;
             state.buffers = state.samples.iter().filter_map(|s| buffer(&ctx, s)).collect();
+            state.voice_buffers = state.voices.iter().filter_map(|s| buffer(&ctx, s)).collect();
             state.ctx = Some(ctx);
         }
         let ctx = state.ctx.clone()?;
@@ -312,6 +326,27 @@ mod web {
             let Some(ctx) = running(state) else { return };
             if let Some(buf) = state.buffers.get(index) {
                 voice(&ctx, buf, volume, rate, false);
+            }
+        });
+    }
+
+    /// Starts a voice line, cutting off any line still playing.
+    pub fn play_voice(index: usize, volume: f32) {
+        stop_voice();
+        STATE.with_borrow_mut(|s| {
+            let Some(state) = s.as_mut() else { return };
+            let Some(ctx) = running(state) else { return };
+            if let Some(buf) = state.voice_buffers.get(index) {
+                state.voice_node = voice(&ctx, buf, volume, 1.0, false).map(|(src, _)| src);
+            }
+        });
+    }
+
+    pub fn stop_voice() {
+        STATE.with_borrow_mut(|s| {
+            if let Some(src) = s.as_mut().and_then(|state| state.voice_node.take()) {
+                #[allow(deprecated)]
+                let _ = src.stop();
             }
         });
     }
@@ -725,7 +760,7 @@ fn music_loop() -> Vec<f32> {
 
 /// Encodes mono samples as a 16-bit PCM WAV file (desktop playback).
 #[cfg(not(target_arch = "wasm32"))]
-fn wav(samples: &[f32]) -> Vec<u8> {
+pub(crate) fn wav(samples: &[f32]) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
     let mut b = Vec::with_capacity(44 + data_len as usize);
     b.extend_from_slice(b"RIFF");

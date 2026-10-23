@@ -4,14 +4,14 @@ A vertical-scrolling arcade shoot-'em-up built with [Bevy](https://bevy.org) 0.2
 
 Fly a lone jet over three hand-scripted stages and fight a multi-part boss at the end of each. Collect the stars that destroyed enemies drop, rescue stranded survivors and earn medals. Between missions, spend your stars in the hangar on permanent upgrades.
 
-Everything is rendered in real-time 3D from a top-down camera, and all of it is generated in code at startup, so the game ships with no asset files:
+Everything is rendered in real-time 3D from a top-down camera, and all of it is generated in code at startup. The only asset files are the recorded voice callouts:
 
 - **Lighting and shadows:** sun-lit models with real shadows.
-- **Islands:** sculpted islands with beaches, reefs, rocky headlands, surf rolling onto the shore, and working lighthouses.
+- **Islands:** sculpted islands with beaches, reefs, rocky headlands, surf rolling onto the shore, and lighthouses.
 - **Desert:** a dune field with layered sandstone mesas.
 - **Arctic:** faceted icebergs, drifting sea ice, and whales that surface to breathe.
-- **Sky and sea:** two layers of clouds that cast shadows, an animated sea with whitecaps, and boats that steer around land.
-- **Sound:** synthesized sound effects and music, plus spoken callouts for major events using the browser's or operating system's voice.
+- **Sky and sea:** two layers of clouds that cast shadows, an animated sea, and boats that steer around land.
+- **Sound:** synthesized sound effects and music, plus spoken radio callouts for major events that play over the music.
 
 **Play in your browser:** https://samialsubhi.github.io/stormwing/ (works on phones too)
 
@@ -104,7 +104,8 @@ On the web, progress is saved in the browser's `localStorage`.
 | `src/touch.rs` | Touch controls: drag to fly, lift to pause, second finger to bomb |
 | `src/art.rs`, `src/model.rs`, `src/textures.rs`, `src/noise.rs` | Procedural 3D models, materials, textures and noise |
 | `src/audio.rs` | Synthesized sound effects and the music loop |
-| `src/voice.rs` | Spoken callouts through the browser's or operating system's speech |
+| `src/voice.rs`, `assets/voice/` | Recorded voice callouts and when they play |
+| `tools/record_voice.py` | Re-records the voice callouts with Piper |
 | `src/save.rs` | Profile persistence (a file on desktop, `localStorage` on the web) and upgrade definitions |
 | `src/dev.rs` | Test harness driven by environment variables (desktop only) |
 | `web/index.html`, `build-web.sh` | Web page and build script for the WebAssembly version |
@@ -130,4 +131,18 @@ Example: watch the first boss fight without touching your real save.
 
 ```bash
 STORMWING_PROFILE=/tmp/test-profile.txt STORMWING_STAGE=1 STORMWING_SKIP=84 STORMWING_GOD=1 cargo run --release
+```
+
+## Voice callouts
+
+The callouts in `assets/voice/` were recorded with the open-source [Piper](https://github.com/OHF-Voice/piper1-gpl) text-to-speech engine and its `en_US-ljspeech-medium` voice, trained on the public-domain [LJ Speech](https://keithito.com/LJ-Speech-Dataset/) dataset. Piper was only used as a tool to make the recordings; none of its code ships with the game. The game trims the clips and adds a light radio effect when it loads them.
+
+To re-record them (for example after changing a line in `tools/record_voice.py`), install Piper and download the voice:
+
+```bash
+python3 -m venv piper-env
+piper-env/bin/pip install piper-tts
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json
+piper-env/bin/python tools/record_voice.py en_US-ljspeech-medium.onnx assets/voice
 ```
