@@ -297,6 +297,15 @@ fn detonate_bombs(
                 LinearRgba::new(2.0, 2.6, 3.5, 0.9),
             );
         }
+        // The blast lights up the whole screen.
+        crate::lights::flash(
+            &mut commands,
+            bomb.pos.extend(z::FX + 80.0),
+            Color::srgb(0.78, 0.88, 1.0),
+            crate::lights::lumens_for(12000.0, z::FX + 80.0),
+            1700.0,
+            0.8,
+        );
         for _ in 0..12 {
             let p = bomb.pos + rng.in_disc(260.0);
             effects::explosion(&mut commands, &art, &mut rng, p.extend(z::ENEMY), 22.0, false);

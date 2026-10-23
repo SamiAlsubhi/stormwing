@@ -4,6 +4,7 @@ use crate::art::Art;
 use crate::audio::{PlaySfx, Sfx};
 use crate::common::*;
 use crate::effects;
+use crate::lights::{self, lumens_for, Blink};
 use crate::player::{Player, MAX_POWER};
 use crate::rng::Rng;
 use crate::state::{AppState, Run};
@@ -174,6 +175,14 @@ pub fn spawn_survivor(commands: &mut Commands, art: &Art, pos: Vec3) {
             DespawnOnExit(AppState::Playing),
             children![
                 (Beacon, fx_quad(art, &art.mat_beacon, 3.0, 60.0)),
+                (
+                    Blink {
+                        base: lumens_for(16000.0, 30.0),
+                        rate: 1.4,
+                    },
+                    lights::point(Color::srgb(1.0, 0.85, 0.4), 0.0, 140.0),
+                    Transform::from_xyz(0.0, 0.0, 30.0),
+                ),
                 (
                     Mesh3d(art.quad.clone()),
                     MeshMaterial3d(art.mat_bar_bg.clone()),

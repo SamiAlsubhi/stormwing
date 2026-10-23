@@ -15,6 +15,7 @@ mod effects;
 mod enemy;
 mod hud;
 mod level;
+mod lights;
 mod menu;
 mod model;
 mod noise;
@@ -75,10 +76,9 @@ fn main() {
             menu::MenuPlugin,
             touch::TouchPlugin,
             voice::VoicePlugin,
+            lights::LightsPlugin,
         ))
-        .insert_resource(DirectionalLightShadowMap {
-            size: if cfg!(target_arch = "wasm32") { 1024 } else { 2048 },
-        })
+        .insert_resource(DirectionalLightShadowMap { size: 2048 })
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.72, 0.8, 1.0),
             brightness: 420.0,

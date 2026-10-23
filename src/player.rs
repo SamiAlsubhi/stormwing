@@ -5,6 +5,7 @@ use crate::audio::{PlaySfx, Sfx};
 use crate::combat::{BombDetonated, PlayerShot};
 use crate::common::*;
 use crate::effects;
+use crate::lights::{self, lumens_for, MuzzleLight};
 use crate::enemy::Enemy;
 use crate::rng::Rng;
 use crate::save::{Profile, Upgrade};
@@ -124,6 +125,15 @@ fn spawn_player(mut commands: Commands, art: Res<Art>, mut meshes: ResMut<Assets
                 Transform::from_xyz(-4.6, -55.0, 0.0).with_scale(Vec3::new(9.0, 18.0, 1.0)),
                 NotShadowCaster,
                 NotShadowReceiver,
+            ),
+            // The gun flash, lighting up the nose and wings with each volley.
+            (
+                MuzzleLight {
+                    kick: 0.0,
+                    peak: lumens_for(18000.0, 40.0),
+                },
+                lights::point(Color::srgb(1.0, 0.8, 0.45), 0.0, 170.0),
+                Transform::from_xyz(0.0, 62.0, 16.0),
             ),
             (
                 ShieldBubble,
@@ -288,6 +298,7 @@ fn player_weapons(
     run: Res<Run>,
     mut sfx: MessageWriter<PlaySfx>,
     mut q: Query<(&mut Player, &Transform)>,
+    mut muzzles: Query<(&mut MuzzleLight, &mut PointLight)>,
 ) {
     let Ok((mut player, t)) = q.single_mut() else { return };
     if !player.controllable() || run.outcome.is_some() {
@@ -336,6 +347,11 @@ fn player_weapons(
             (26.0, 12.0),
             color,
         );
+        let tint = color.with_alpha(1.0) * (1.0 / color.red.max(color.green).max(color.blue));
+        for (mut muzzle, mut light) in &mut muzzles {
+            muzzle.kick = 1.0;
+            light.color = Color::LinearRgba(tint);
+        }
         sfx.write(PlaySfx::new(Sfx::Shoot));
     }
 

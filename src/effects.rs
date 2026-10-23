@@ -253,6 +253,19 @@ pub fn explosion(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec3, s
     let base = pos.truncate();
     let z = pos.z + 6.0;
 
+    // A burst of real light over the sea, islands and nearby aircraft.
+    // Over the ground it's a bright pool of firelight; in the air it mostly
+    // lights up the aircraft nearby.
+    let (lift, height, lux) = if ground { (55.0, 55.0, 25000.0) } else { (80.0, pos.z + 80.0, 6000.0) };
+    crate::lights::flash(
+        commands,
+        pos + Vec3::Z * lift,
+        Color::srgb(1.0, 0.6, 0.28),
+        crate::lights::lumens_for(lux * s.sqrt(), height),
+        height + 150.0 + 100.0 * s,
+        0.3 + 0.07 * s,
+    );
+
     // Bright central flash.
     let mut flash = Particle::new(Vec2::ZERO, 0.18, Vec2::splat(70.0 * s), LinearRgba::rgb(9.0, 6.0, 3.0));
     flash.size.1 = Vec2::splat(150.0 * s);

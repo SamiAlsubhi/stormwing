@@ -109,113 +109,134 @@
     })();
   </script>
   <script type="module">
-    // Each build has uniquely named files; version.json (never cached) says
-    // which ones belong together.
-    const { build } = await (await fetch(`./version.json?t=${Date.now()}`, { cache: 'no-store' })).json();
-    const { default: init } = await import(`./stormwing-${build}.js`);
+    // The game draws with WebGPU. Browsers without it can't run it, so check
+    // first and explain, rather than download the game for nothing.
+    if (!navigator.gpu) {
+      unsupported('This browser doesn\u2019t support WebGPU, which Stormwing needs for its 3D graphics.');
+    } else if (!(await navigator.gpu.requestAdapter().catch(() => null))) {
+      unsupported('WebGPU is turned off in this browser, or this device\u2019s graphics can\u2019t use it.');
+    } else {
+      await run();
+    }
 
-    // Phones only let a page start audio from inside a touch, click or key
-    // press. So the game's AudioContext is created right here, on the first
-    // gesture, and the game (audio.rs) plays its sounds through it.
-    let audio = null;
-    const unlockAudio = () => {
-      if (document.hidden) return;
-      if (!audio) {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if (AC) {
-          audio = new AC();
-          window.stormwingAudio = audio;
-          // iOS: a tiny silent sound inside the gesture fully wakes audio up.
-          const silence = audio.createBuffer(1, 1, 22050);
-          const src = audio.createBufferSource();
-          src.buffer = silence;
-          src.connect(audio.destination);
-          src.start(0);
+    function unsupported(reason) {
+      document.getElementById('bar').remove();
+      document.getElementById('status').textContent = 'This browser can\u2019t run Stormwing';
+      document.getElementById('help').innerHTML =
+        `${reason}<br><br>Try a recent Chrome or Edge on a computer or Android phone, ` +
+        'or Safari on macOS&nbsp;26 or iOS&nbsp;26 and later. On iPhone and iPad every browser ' +
+        'uses Safari\u2019s engine, so updating iOS is what counts.';
+    }
+
+    async function run() {
+      // Each build has uniquely named files; version.json (never cached) says
+      // which ones belong together.
+      const { build } = await (await fetch(`./version.json?t=${Date.now()}`, { cache: 'no-store' })).json();
+      const { default: init } = await import(`./stormwing-${build}.js`);
+
+      // Phones only let a page start audio from inside a touch, click or key
+      // press. So the game's AudioContext is created right here, on the first
+      // gesture, and the game (audio.rs) plays its sounds through it.
+      let audio = null;
+      const unlockAudio = () => {
+        if (document.hidden) return;
+        if (!audio) {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (AC) {
+            audio = new AC();
+            window.stormwingAudio = audio;
+            // iOS: a tiny silent sound inside the gesture fully wakes audio up.
+            const silence = audio.createBuffer(1, 1, 22050);
+            const src = audio.createBufferSource();
+            src.buffer = silence;
+            src.connect(audio.destination);
+            src.start(0);
+          }
         }
-      }
-      if (audio && audio.state !== 'running') audio.resume().catch(() => {});
-    };
-    for (const type of ['touchend', 'pointerup', 'mouseup', 'click', 'keydown']) {
-      document.addEventListener(type, unlockAudio, { capture: true, passive: true });
-    }
-    // iOS can interrupt the page's audio (a call, Siri, another app) and
-    // not restart it, so keep a watchdog that wakes it back up.
-    const restartAudio = () => {
-      if (audio && !document.hidden && audio.state !== 'running') audio.resume().catch(() => {});
-    };
-    setInterval(restartAudio, 400);
-    // Silence everything while the page is in the background.
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) {
-        if (audio) audio.suspend().catch(() => {});
-      } else if (audio) {
-        audio.resume().catch(() => {});
-      }
-    });
-    // iOS: play through the media channel so the silent switch doesn't mute it.
-    try {
-      if (navigator.audioSession) navigator.audioSession.type = 'playback';
-    } catch (_) {}
-
-    const overlay = document.getElementById('overlay');
-    const fill = document.getElementById('fill');
-    const status = document.getElementById('status');
-    const canvas = document.getElementById('stormwing');
-
-    // Download and compile the game first, then wait for a tap: browsers only
-    // let a page start audio in response to a user gesture.
-    async function load() {
-      const response = await fetch(`./stormwing-${build}.wasm`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const total = Number(response.headers.get('content-length')) || 0;
-      const reader = response.body.getReader();
-      const chunks = [];
-      let received = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-        const mb = (received / 1048576).toFixed(1);
-        status.textContent = `Loading... ${mb} MB`;
-        if (total) fill.style.width = `${Math.min(100, (received / total) * 100)}%`;
-      }
-      fill.style.width = '100%';
-      status.textContent = 'Preparing...';
-      const bytes = new Uint8Array(received);
-      let offset = 0;
-      for (const chunk of chunks) {
-        bytes.set(chunk, offset);
-        offset += chunk.length;
-      }
-      return WebAssembly.compile(bytes);
-    }
-
-    try {
-      const module = await load();
-      status.textContent = 'Preparing graphics...';
-      // Keep this screen up until the game has drawn its first frames (phones
-      // can take a while to compile the 3D shaders), then go straight in.
-      // Sound starts on the first touch or key press, as browsers require.
-      let shown = false;
-      const reveal = () => {
-        if (shown) return;
-        shown = true;
-        overlay.style.opacity = '0';
-        setTimeout(() => overlay.remove(), 700);
+        if (audio && audio.state !== 'running') audio.resume().catch(() => {});
       };
-      window.stormwingReady = reveal;
-      setTimeout(reveal, 45000);
-      canvas.focus();
-      try {
-        await init({ module_or_path: module });
-      } catch (e) {
-        // winit stops the event loop by throwing; that one is expected.
-        if (!String(e).includes('Using exceptions for control flow')) throw e;
+      for (const type of ['touchend', 'pointerup', 'mouseup', 'click', 'keydown']) {
+        document.addEventListener(type, unlockAudio, { capture: true, passive: true });
       }
-    } catch (e) {
-      status.textContent = `Could not load the game: ${e}`;
-      console.error(e);
+      // iOS can interrupt the page's audio (a call, Siri, another app) and
+      // not restart it, so keep a watchdog that wakes it back up.
+      const restartAudio = () => {
+        if (audio && !document.hidden && audio.state !== 'running') audio.resume().catch(() => {});
+      };
+      setInterval(restartAudio, 400);
+      // Silence everything while the page is in the background.
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          if (audio) audio.suspend().catch(() => {});
+        } else if (audio) {
+          audio.resume().catch(() => {});
+        }
+      });
+      // iOS: play through the media channel so the silent switch doesn't mute it.
+      try {
+        if (navigator.audioSession) navigator.audioSession.type = 'playback';
+      } catch (_) {}
+
+      const overlay = document.getElementById('overlay');
+      const fill = document.getElementById('fill');
+      const status = document.getElementById('status');
+      const canvas = document.getElementById('stormwing');
+
+      // Download and compile the game first, then wait for a tap: browsers only
+      // let a page start audio in response to a user gesture.
+      async function load() {
+        const response = await fetch(`./stormwing-${build}.wasm`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const total = Number(response.headers.get('content-length')) || 0;
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          const mb = (received / 1048576).toFixed(1);
+          status.textContent = `Loading... ${mb} MB`;
+          if (total) fill.style.width = `${Math.min(100, (received / total) * 100)}%`;
+        }
+        fill.style.width = '100%';
+        status.textContent = 'Preparing...';
+        const bytes = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return WebAssembly.compile(bytes);
+      }
+
+      try {
+        const module = await load();
+        status.textContent = 'Preparing graphics...';
+        // Keep this screen up until the game has drawn its first frames (phones
+        // can take a while to compile the 3D shaders), then go straight in.
+        // Sound starts on the first touch or key press, as browsers require.
+        let shown = false;
+        const reveal = () => {
+          if (shown) return;
+          shown = true;
+          overlay.style.opacity = '0';
+          setTimeout(() => overlay.remove(), 700);
+        };
+        window.stormwingReady = reveal;
+        setTimeout(reveal, 45000);
+        canvas.focus();
+        try {
+          await init({ module_or_path: module });
+        } catch (e) {
+          // winit stops the event loop by throwing; that one is expected.
+          if (!String(e).includes('Using exceptions for control flow')) throw e;
+        }
+      } catch (e) {
+        status.textContent = `Could not load the game: ${e}`;
+        console.error(e);
+      }
     }
   </script>
 </body>

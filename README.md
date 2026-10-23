@@ -6,14 +6,14 @@ Fly a lone jet over three hand-scripted stages and fight a multi-part boss at th
 
 Everything is rendered in real-time 3D from a top-down camera, and all of it is generated in code at startup. The only asset files are the recorded voice callouts:
 
-- **Lighting and shadows:** sun-lit models with real shadows.
+- **Lighting and shadows:** sun-lit models with real shadows, and explosions, the bomb, gunfire and rescue beacons that cast their own light on the land, ice and aircraft around them.
 - **Islands:** sculpted islands with beaches, reefs, rocky headlands, surf rolling onto the shore, and lighthouses.
 - **Desert:** a dune field with layered sandstone mesas.
 - **Arctic:** faceted icebergs, drifting sea ice, and whales that surface to breathe.
 - **Sky and sea:** two layers of clouds that cast shadows, an animated sea, and boats that steer around land.
 - **Sound:** synthesized sound effects and music, plus spoken radio callouts for major events that play over the music.
 
-**Play in your browser:** https://samialsubhi.github.io/stormwing/ (works on phones too)
+**Play in your browser:** https://samialsubhi.github.io/stormwing/ (works on phones too). It needs a browser with WebGPU: a recent Chrome or Edge, or Safari on iOS 26 / macOS 26 and later.
 
 ## Running
 
@@ -72,7 +72,7 @@ Progress is saved to:
 
 ## Web build
 
-The game also runs in the browser as WebAssembly (WebGL2). Every push to `main` is built by GitHub Actions (`.github/workflows/pages.yml`) and deployed to GitHub Pages.
+The game also runs in the browser as WebAssembly, rendering with WebGPU (there is no WebGL fallback; the page tells visitors when their browser can't run it). Every push to `main` is built by GitHub Actions (`.github/workflows/pages.yml`) and deployed to GitHub Pages.
 
 To build it locally:
 
