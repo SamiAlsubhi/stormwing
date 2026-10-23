@@ -1,6 +1,7 @@
 //! Sound effects and music, synthesised at startup into in-memory WAV files.
 
 use crate::save::Profile;
+use crate::state::{AppState, PauseFlow};
 use bevy::audio::{AudioSinkPlayback, Volume};
 use bevy::prelude::*;
 use std::f32::consts::TAU;
@@ -25,9 +26,11 @@ pub enum Sfx {
     Shield,
     Missile,
     Denied,
+    Spout,
+    WhaleCall,
 }
 
-const SFX_COUNT: usize = 15;
+const SFX_COUNT: usize = 17;
 
 impl Sfx {
     /// Base volume and the minimum gap between two plays of the same sound.
@@ -48,6 +51,8 @@ impl Sfx {
             Sfx::Shield => (0.45, 0.1),
             Sfx::Missile => (0.18, 0.08),
             Sfx::Denied => (0.4, 0.1),
+            Sfx::Spout => (0.32, 0.5),
+            Sfx::WhaleCall => (0.22, 4.0),
         }
     }
 }
@@ -119,6 +124,8 @@ fn synthesize(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
         add(sfx_shield()),
         add(sfx_missile()),
         add(sfx_denied()),
+        add(sfx_spout()),
+        add(sfx_whale_call()),
     ];
     debug_assert_eq!(sfx.len(), SFX_COUNT);
     let music = add(music_loop());
@@ -171,11 +178,29 @@ fn toggle_mute(keys: Res<ButtonInput<KeyCode>>, mut profile: ResMut<Profile>) {
     }
 }
 
-fn sync_music_volume(profile: Res<Profile>, mut sinks: Query<&mut AudioSink, With<Music>>) {
-    let want = if profile.muted { 0.0 } else { MUSIC_VOLUME };
+/// The music runs at full pace and volume while flying; in menus and while
+/// paused it eases down to a slower, quieter tempo, and glides back up.
+fn sync_music_volume(
+    profile: Res<Profile>,
+    state: Res<State<AppState>>,
+    flow: Res<PauseFlow>,
+    time: Res<Time<Real>>,
+    mut current: Local<Option<(f32, f32)>>,
+    mut sinks: Query<&mut AudioSink, With<Music>>,
+) {
+    let playing = *state.get() == AppState::Playing && flow.flying();
+    let (want_speed, want_volume) = if playing { (1.0, MUSIC_VOLUME) } else { (0.86, MUSIC_VOLUME * 0.5) };
+    let want_volume = if profile.muted || !profile.music_on { 0.0 } else { want_volume };
+    let (speed, volume) = current.get_or_insert((want_speed, want_volume));
+    let k = 1.0 - (-time.delta_secs() * 1.6).exp();
+    *speed += (want_speed - *speed) * k;
+    *volume += (want_volume - *volume) * k;
     for mut sink in &mut sinks {
-        if (sink.volume().to_linear() - want).abs() > 1e-3 {
-            sink.set_volume(Volume::Linear(want));
+        if (sink.speed() - *speed).abs() > 1e-3 {
+            sink.set_speed(*speed);
+        }
+        if (sink.volume().to_linear() - *volume).abs() > 1e-3 {
+            sink.set_volume(Volume::Linear(*volume));
         }
     }
 }
@@ -414,6 +439,48 @@ fn sfx_denied() -> Vec<f32> {
             square(phase, 0.5) * gate * 0.3
         })
         .collect()
+}
+
+/// A whale's blow: a breathy, lowpassed rush of air.
+fn sfx_spout() -> Vec<f32> {
+    let n = samples(1.1);
+    let mut noise = Noise(808);
+    let (mut lp, mut lp2) = (0.0, 0.0);
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let s = noise.next();
+            lp = lp * 0.82 + s * 0.18;
+            lp2 = lp2 * 0.7 + lp * 0.3;
+            let env = (t / 0.06).min(1.0) * (-t * 2.6).exp();
+            (lp - lp2 * 0.6) * env * 2.2
+        })
+        .collect()
+}
+
+/// A distant, mournful whale call: a slow gliding moan with vibrato.
+fn sfx_whale_call() -> Vec<f32> {
+    let dur = 2.6;
+    let n = samples(dur);
+    let mut phase = 0.0;
+    let mut out: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let k = t / dur;
+            let f = 230.0 - 120.0 * k + 60.0 * (k * std::f32::consts::PI).sin() + (t * 5.5 * TAU).sin() * 6.0;
+            phase += f / RATE as f32;
+            let env = (k * 6.0).min(1.0) * (1.0 - k).powf(1.4);
+            ((phase * TAU).sin() + 0.35 * (phase * 2.0 * TAU).sin() + 0.12 * (phase * 3.0 * TAU).sin()) * env * 0.4
+        })
+        .collect();
+    // A couple of soft echoes make it sound far away under the sea.
+    for (delay, gain) in [(0.23, 0.35), (0.51, 0.18)] {
+        let d = samples(delay);
+        for i in (d..out.len()).rev() {
+            out[i] += out[i - d] * gain;
+        }
+    }
+    out
 }
 
 /// An original looping chiptune: bass, arpeggio, pad and drums over an

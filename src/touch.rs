@@ -6,7 +6,7 @@
 //! - Tap with a second finger to drop a bomb.
 
 use crate::player::Player;
-use crate::state::{AppState, PlayState, Run};
+use crate::state::{AppState, PauseFlow, PlayState, Run};
 use bevy::prelude::*;
 
 /// Finger movement is multiplied by this, so you don't have to drag as far.
@@ -73,6 +73,7 @@ fn touch_autopause(
     run: Res<Run>,
     state: Option<Res<State<PlayState>>>,
     mut next: ResMut<NextState<PlayState>>,
+    mut flow: ResMut<PauseFlow>,
     player: Query<&Player>,
     windows: Query<&Window>,
 ) {
@@ -82,9 +83,14 @@ fn touch_autopause(
     }
     match state.get() {
         PlayState::Running => {
+            // Lifting the finger eases into a pause; touching again before it
+            // completes simply carries on.
             let flying = player.single().is_ok_and(|p| p.controllable());
-            if flying && touches.iter().next().is_none() {
-                next.set(PlayState::Paused);
+            let touching = touches.iter().next().is_some();
+            if flying && !touching {
+                flow.requested = true;
+            } else if touching {
+                flow.requested = false;
             }
         }
         PlayState::Paused => {
@@ -112,10 +118,8 @@ pub fn drag_delta(
         input.drag = touches.iter().next().map(|t| t.id());
     }
     let touch = touches.get_pressed(input.drag?)?;
-    let now = camera.viewport_to_world_2d(camera_transform, touch.position()).ok()?;
-    let before = camera
-        .viewport_to_world_2d(camera_transform, touch.previous_position())
-        .ok()?;
+    let now = crate::common::screen_to_world(camera, camera_transform, touch.position())?;
+    let before = crate::common::screen_to_world(camera, camera_transform, touch.previous_position())?;
     Some((now - before) * TOUCH_SENSITIVITY)
 }
 

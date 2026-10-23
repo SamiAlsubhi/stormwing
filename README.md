@@ -4,7 +4,14 @@ A vertical-scrolling arcade shoot-'em-up built with [Bevy](https://bevy.org) 0.2
 
 Fly a lone jet over three hand-scripted stages and fight a multi-part boss at the end of each. Collect the stars that destroyed enemies drop, rescue stranded survivors and earn medals. Between missions, spend your stars in the hangar on permanent upgrades.
 
-All art, sound effects and music are generated procedurally at startup, so the game ships with no asset files.
+Everything is rendered in real-time 3D from a top-down camera, and all of it is generated in code at startup, so the game ships with no asset files:
+
+- **Lighting and shadows:** sun-lit models with real shadows.
+- **Islands:** sculpted islands with beaches, reefs, rocky headlands, surf rolling onto the shore, and working lighthouses.
+- **Desert:** a dune field with layered sandstone mesas.
+- **Arctic:** faceted icebergs, drifting sea ice, and whales that surface to breathe.
+- **Sky and sea:** two layers of clouds that cast shadows, an animated sea with whitecaps, and boats that steer around land.
+- **Sound:** synthesized sound effects and music, plus spoken callouts for major events using the browser's or operating system's voice.
 
 **Play in your browser:** https://samialsubhi.github.io/stormwing/ (works on phones too)
 
@@ -28,7 +35,9 @@ The first build compiles Bevy and takes a few minutes. Debug builds also run wel
 
 The cannon fires automatically.
 
-On a touch screen, drag one finger anywhere to fly. The plane follows your finger's movement, so your finger never hides it. Lifting your finger pauses the game; touch the lower half of the screen to keep flying. Tap with a second finger to drop a bomb.
+On a touch screen, drag one finger anywhere to fly. The plane follows your finger's movement, so your finger never hides it. Lifting your finger eases the game into a slow-motion pause; touch the lower half of the screen to keep flying. Tap with a second finger to drop a bomb.
+
+The game also pauses when its window or browser tab loses focus. The music can be switched off from the title screen; sound effects stay on.
 
 ## How it plays
 
@@ -88,13 +97,14 @@ On the web, progress is saved in the browser's `localStorage`.
 | `src/boss.rs` | Multi-part bosses and their attack phases |
 | `src/combat.rs` | Projectiles, collisions, damage, destruction |
 | `src/pickups.rs` | Stars, power-ups, survivors |
-| `src/background.rs` | Stage themes, procedural islands, clouds, roads |
+| `src/terrain.rs` | Sea, islands, icebergs, dunes and mesas, clouds, surf, lighthouses, whales |
 | `src/effects.rs` | Particles, explosions, screen shake, flashes |
 | `src/hud.rs` | In-game HUD and pause menu |
 | `src/menu.rs` | Title, mission select, hangar and results screens |
 | `src/touch.rs` | Touch controls: drag to fly, lift to pause, second finger to bomb |
-| `src/art.rs`, `src/shapes.rs`, `src/textures.rs` | Procedural vector art and textures |
+| `src/art.rs`, `src/model.rs`, `src/textures.rs`, `src/noise.rs` | Procedural 3D models, materials, textures and noise |
 | `src/audio.rs` | Synthesized sound effects and the music loop |
+| `src/voice.rs` | Spoken callouts through the browser's or operating system's speech |
 | `src/save.rs` | Profile persistence (a file on desktop, `localStorage` on the web) and upgrade definitions |
 | `src/dev.rs` | Test harness driven by environment variables (desktop only) |
 | `web/index.html`, `build-web.sh` | Web page and build script for the WebAssembly version |

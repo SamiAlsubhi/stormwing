@@ -6,11 +6,13 @@ use crate::audio::{PlaySfx, Sfx};
 use crate::combat::{spawn_enemy_shot, EnemyShot, Shielded};
 use crate::common::*;
 use crate::effects;
+use crate::voice::{Line, Say};
 use crate::enemy::{fan, spawn_enemy, Barrel, Difficulty, Enemy, EnemyKind, Gun, Move, Pattern, SpawnCtx};
 use crate::pickups;
 use crate::player::Player;
 use crate::rng::Rng;
 use crate::state::{AppState, Outcome, Run};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use std::f32::consts::{PI, TAU};
 
@@ -21,6 +23,8 @@ pub struct BossDef {
     /// Turret mount points relative to the boss centre (screen orientation).
     parts: &'static [(f32, f32)],
     part_hp: f32,
+    /// Height of the turret mounts above the boss's centre.
+    part_z: f32,
     /// Rotation speed of the whole boss (the citadel slowly turns).
     spin: f32,
     /// Horizontal sway amplitude while fighting.
@@ -35,6 +39,7 @@ pub const BOSSES: [BossDef; 3] = [
         radius: 70.0,
         parts: &[(-150.0, 18.0), (150.0, 18.0), (-62.0, -40.0), (62.0, -40.0)],
         part_hp: 42.0,
+        part_z: 8.0,
         spin: 0.0,
         sway: 140.0,
         arms: 3,
@@ -45,6 +50,7 @@ pub const BOSSES: [BossDef; 3] = [
         radius: 80.0,
         parts: &[(-72.0, 95.0), (72.0, 95.0), (-72.0, -70.0), (72.0, -70.0), (0.0, -110.0)],
         part_hp: 50.0,
+        part_z: 36.0,
         spin: 0.0,
         sway: 80.0,
         arms: 4,
@@ -62,6 +68,7 @@ pub const BOSSES: [BossDef; 3] = [
             (-104.0, 60.0),
         ],
         part_hp: 46.0,
+        part_z: 20.0,
         spin: 0.22,
         sway: 100.0,
         arms: 5,
@@ -125,8 +132,8 @@ pub fn spawn_boss(commands: &mut Commands, ctx: &mut SpawnCtx, index: usize) {
     let start = Vec2::new(0.0, HALF_H + 300.0);
     let boss = commands
         .spawn((
-            Mesh2d(art.bosses[index].clone()),
-            MeshMaterial2d(art.mat_base.clone()),
+            Mesh3d(art.bosses[index].paint.clone()),
+            MeshMaterial3d(art.mat_paint.clone()),
             Transform::from_translation(start.extend(z::BOSS)).with_rotation(Quat::from_rotation_z(PI)),
             Enemy {
                 kind: EnemyKind::Boss,
@@ -158,25 +165,16 @@ pub fn spawn_boss(commands: &mut Commands, ctx: &mut SpawnCtx, index: usize) {
         ))
         .with_children(|c| {
             c.spawn((
-                Mesh2d(art.bosses[index].clone()),
-                MeshMaterial2d(art.mat_shadow.clone()),
-                Transform::from_scale(Vec3::splat(0.85)),
-                Shadow {
-                    offset: Vec2::new(50.0, -80.0),
-                },
-            ));
-            c.spawn((
                 BossShieldFx,
-                Sprite {
-                    image: art.tex_ring.clone(),
-                    custom_size: Some(Vec2::splat(def.radius * 2.6)),
-                    color: Color::linear_rgba(0.6, 1.6, 3.2, 0.8),
-                    ..default()
-                },
-                Transform::from_xyz(0.0, 0.0, 0.5),
+                Mesh3d(art.quad.clone()),
+                MeshMaterial3d(art.mat_boss_shield.clone()),
+                Transform::from_xyz(0.0, 0.0, 60.0).with_scale(Vec3::new(def.radius * 2.6, def.radius * 2.6, 1.0)),
+                NotShadowCaster,
+                NotShadowReceiver,
             ));
         })
         .id();
+    attach_model_parts(commands, boss, &art.bosses[index], art);
 
     for (i, &(x, y)) in def.parts.iter().enumerate() {
         let offset = Vec2::new(x, y);
@@ -192,10 +190,10 @@ pub fn spawn_boss(commands: &mut Commands, ctx: &mut SpawnCtx, index: usize) {
             gun = gun.burst(3, 0.14);
         }
         gun.timer = 1.0 + i as f32 * 0.35;
-        commands.spawn((
-            Mesh2d(art.boss_turret.clone()),
-            MeshMaterial2d(art.mat_base.clone()),
-            Transform::from_translation((start + offset).extend(z::BOSS + 1.0)),
+        let part = commands.spawn((
+            Mesh3d(art.boss_turret.paint.clone()),
+            MeshMaterial3d(art.mat_paint.clone()),
+            Transform::from_translation((start + offset).extend(z::BOSS + def.part_z)),
             Enemy {
                 kind: EnemyKind::BossTurret,
                 score: 1500,
@@ -214,13 +212,17 @@ pub fn spawn_boss(commands: &mut Commands, ctx: &mut SpawnCtx, index: usize) {
             gun,
             BossPart { boss, offset },
             DespawnOnExit(AppState::Playing),
-            children![(
+        )).id();
+        let barrel = commands
+            .spawn((
                 Barrel,
-                Mesh2d(art.boss_barrel.clone()),
-                MeshMaterial2d(art.mat_base.clone()),
-                Transform::from_xyz(0.0, 0.0, 0.2),
-            )],
-        ));
+                Mesh3d(art.boss_barrel.paint.clone()),
+                MeshMaterial3d(art.mat_paint.clone()),
+                Transform::default(),
+                ChildOf(part),
+            ))
+            .id();
+        attach_model_parts(commands, barrel, &art.boss_barrel, art);
     }
 }
 
@@ -260,6 +262,7 @@ fn move_boss(
                 let p = centre + Vec2::from_angle(angle).rotate(part.offset);
                 pt.translation.x = p.x;
                 pt.translation.y = p.y;
+                pt.translation.z = t.translation.z + def.part_z;
             }
         }
     }
@@ -369,7 +372,7 @@ fn boss_attacks(
                             dur: 3.2,
                             exit_speed: 300.0,
                         };
-                        let e = spawn_enemy(&mut commands, &mut ctx, EnemyKind::Dart, p0, mv, None);
+                        let e = spawn_enemy(&mut commands, &mut ctx, EnemyKind::Dart, p0, 0.0, mv, None);
                         commands.entity(e).insert(Escort);
                     }
                     // Escorts don't count towards the stage's kill medal.
@@ -390,6 +393,7 @@ fn expose_core(
     mut commands: Commands,
     art: Res<Art>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<Say>,
     mut status: ResMut<BossStatus>,
     mut bosses: Query<(Entity, &mut Boss, &Health, &Transform, &Children, Has<Shielded>)>,
     parts: Query<&BossPart>,
@@ -420,9 +424,10 @@ fn expose_core(
                     commands.entity(child).try_despawn();
                 }
             }
-            let pos = t.translation.truncate();
+            let pos = t.translation + Vec3::Z * 60.0;
             effects::shockwave(&mut commands, &art, pos, 60.0, 500.0, 0.5, LinearRgba::rgb(0.8, 2.0, 3.5));
-            effects::floating_text(&mut commands, pos + Vec2::new(0.0, -120.0), "CORE EXPOSED", Color::srgb(0.6, 0.9, 1.0), 30.0);
+            effects::floating_text(&mut commands, pos + Vec3::new(0.0, -120.0, 0.0), "CORE EXPOSED", Color::srgb(0.6, 0.9, 1.0), 30.0);
+            voice.write(Say(Line::CoreExposed));
             sfx.write(PlaySfx::new(Sfx::Shield).pitch(0.6));
         }
     }
@@ -451,7 +456,7 @@ fn boss_defeat(
             }
             commands.entity(se).try_despawn();
         }
-        effects::explosion(&mut commands, &art, &mut rng, t.translation.truncate(), 60.0, false);
+        effects::explosion(&mut commands, &art, &mut rng, t.translation, 60.0, false);
         sfx.write(PlaySfx::new(Sfx::ExplodeBig));
     }
 }
@@ -464,6 +469,7 @@ fn boss_dying(
     mut run: ResMut<Run>,
     mut shake: ResMut<Shake>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<Say>,
     mut bosses: Query<(Entity, &Boss, &Enemy, &mut BossDying, &Transform)>,
     parts: Query<(Entity, &BossPart)>,
 ) {
@@ -472,24 +478,26 @@ fn boss_dying(
         dying.t += dt;
         dying.boom_t -= dt;
         let pos = t.translation.truncate();
+        let alt = t.translation.z + 20.0;
         let r = BOSSES[boss.def].radius * 2.0;
         if dying.boom_t <= 0.0 {
             dying.boom_t = 0.11;
             let p = pos + rng.in_disc(r);
             let size = rng.range(20.0, 45.0);
-            effects::explosion(&mut commands, &art, &mut rng, p, size, false);
+            effects::explosion(&mut commands, &art, &mut rng, p.extend(alt), size, false);
             sfx.write(PlaySfx::new(Sfx::ExplodeSmall).pitch(rng.range(0.7, 1.1)));
             shake.add(0.15);
         }
         if dying.t >= DEATH_TIME {
             for _ in 0..6 {
                 let p = pos + rng.in_disc(r * 0.7);
-                effects::explosion(&mut commands, &art, &mut rng, p, 70.0, false);
+                effects::explosion(&mut commands, &art, &mut rng, p.extend(alt), 70.0, false);
             }
-            effects::explosion(&mut commands, &art, &mut rng, pos, 140.0, false);
-            effects::shockwave(&mut commands, &art, pos, 80.0, 1600.0, 0.9, LinearRgba::new(3.0, 2.2, 1.4, 0.9));
-            effects::screen_flash(&mut commands, &art, Color::WHITE, 0.85, 0.9);
-            effects::floating_text(&mut commands, pos, enemy.score.to_string(), Color::srgb(1.0, 0.9, 0.5), 40.0);
+            effects::explosion(&mut commands, &art, &mut rng, pos.extend(alt), 140.0, false);
+            effects::shockwave(&mut commands, &art, pos.extend(alt + 20.0), 80.0, 1600.0, 0.9, LinearRgba::new(3.0, 2.2, 1.4, 0.9));
+            effects::screen_flash(&mut commands, Color::WHITE, 0.85, 0.9);
+            effects::floating_text(&mut commands, pos.extend(alt), enemy.score.to_string(), Color::srgb(1.0, 0.9, 0.5), 40.0);
+            voice.write(Say(Line::MissionComplete));
             pickups::drop_stars(&mut commands, &art, &mut rng, pos, enemy.stars);
             shake.add(1.0);
             sfx.write(PlaySfx::new(Sfx::ExplodeBig).pitch(0.7));

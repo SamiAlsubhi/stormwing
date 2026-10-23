@@ -31,6 +31,7 @@
       touch-action: none;
     }
     #overlay {
+      transition: opacity 0.6s;
       position: fixed;
       inset: 0;
       display: flex;
@@ -56,18 +57,6 @@
     #bar { width: min(320px, 70vw); height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
     #fill { width: 0; height: 100%; background: #73d0ff; transition: width 0.15s; }
     #status { min-height: 1.2em; font-size: 14px; color: rgba(255, 255, 255, 0.7); }
-    #play {
-      font: inherit;
-      font-size: 22px;
-      color: #fff;
-      background: #14324f;
-      border: 2px solid #73d0ff;
-      border-radius: 12px;
-      padding: 14px 40px;
-      cursor: pointer;
-    }
-    #play:hover { background: #1d4a73; }
-    #play[hidden] { display: none; }
     #help { max-width: 440px; font-size: 13px; line-height: 1.6; color: rgba(255, 255, 255, 0.5); }
   </style>
 </head>
@@ -78,7 +67,6 @@
     <div class="tag">ARCADE SKY COMBAT</div>
     <div id="bar"><div id="fill"></div></div>
     <div id="status">Loading...</div>
-    <button id="play" hidden>Tap to play</button>
     <div id="help">
       Touch: drag one finger to fly, lift it to pause, tap a second finger to bomb.<br>
       Keyboard: WASD / arrows to fly, Space to bomb, Esc to pause, M to mute.
@@ -102,14 +90,30 @@
       window.AudioContext = TrackedAudioContext;
       window.webkitAudioContext = TrackedAudioContext;
     }
+    let speechUnlocked = false;
     const resumeAudio = () => {
+      if (document.hidden) return;
       for (const ctx of audioContexts) {
         if (ctx.state !== 'running') ctx.resume().catch(() => {});
+      }
+      // iOS only allows speech after it has been started from a gesture once.
+      if (!speechUnlocked && window.speechSynthesis) {
+        speechUnlocked = true;
+        try { speechSynthesis.speak(new SpeechSynthesisUtterance('')); } catch (_) {}
       }
     };
     for (const type of ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'mousedown', 'keydown']) {
       document.addEventListener(type, resumeAudio, { capture: true, passive: true });
     }
+    // Silence everything while the page is in the background.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        for (const ctx of audioContexts) ctx.suspend().catch(() => {});
+        if (window.speechSynthesis) speechSynthesis.cancel();
+      } else {
+        resumeAudio();
+      }
+    });
     // iOS: play through the media channel so the silent switch doesn't mute it.
     try {
       if (navigator.audioSession) navigator.audioSession.type = 'playback';
@@ -118,7 +122,6 @@
     const overlay = document.getElementById('overlay');
     const fill = document.getElementById('fill');
     const status = document.getElementById('status');
-    const play = document.getElementById('play');
     const canvas = document.getElementById('stormwing');
 
     // Download and compile the game first, then wait for a tap: browsers only
@@ -152,21 +155,21 @@
 
     try {
       const module = await load();
-      status.textContent = '';
-      play.hidden = false;
-      play.addEventListener('click', async () => {
-        overlay.remove();
-        canvas.focus();
-        try {
-          await init({ module_or_path: module });
-        } catch (e) {
-          // winit stops the event loop by throwing; that one is expected.
-          if (!String(e).includes('Using exceptions for control flow')) throw e;
-        }
-        // The game's AudioContext exists now; nudge it while the tap still counts.
-        resumeAudio();
-        setTimeout(resumeAudio, 250);
-      }, { once: true });
+      status.textContent = 'Starting...';
+      // Go straight into the game. Sound starts on the first touch or key
+      // press, as browsers require.
+      setTimeout(() => {
+        overlay.style.opacity = '0';
+        setTimeout(() => overlay.remove(), 700);
+      }, 400);
+      canvas.focus();
+      try {
+        await init({ module_or_path: module });
+      } catch (e) {
+        // winit stops the event loop by throwing; that one is expected.
+        if (!String(e).includes('Using exceptions for control flow')) throw e;
+      }
+      resumeAudio();
     } catch (e) {
       status.textContent = `Could not load the game: ${e}`;
       console.error(e);

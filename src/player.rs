@@ -1,6 +1,6 @@
 //! The player's aircraft: movement, cannon, seeker missiles and bombs.
 
-use crate::art::Art;
+use crate::art::{player_set, Art};
 use crate::audio::{PlaySfx, Sfx};
 use crate::combat::{BombDetonated, PlayerShot};
 use crate::common::*;
@@ -10,6 +10,7 @@ use crate::rng::Rng;
 use crate::save::{Profile, Upgrade};
 use crate::state::{AppState, Outcome, Run};
 use crate::touch::{self, TouchInput};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 
 pub const PLAYER_SPEED: f32 = 540.0;
@@ -78,10 +79,12 @@ impl Plugin for PlayerPlugin {
     }
 }
 
-fn spawn_player(mut commands: Commands, art: Res<Art>, profile: Res<Profile>) {
+fn spawn_player(mut commands: Commands, art: Res<Art>, mut meshes: ResMut<Assets<Mesh>>, profile: Res<Profile>) {
     let hull = profile.level(Upgrade::Hull) as f32;
     let max_hp = 6.0 + 2.0 * hull;
-    commands.spawn((
+    // The jet shows its hangar upgrades (extra guns, missile rails, armour...).
+    let model = player_set(&mut meshes, profile.upgrades);
+    let player = commands.spawn((
         Player {
             hp: max_hp,
             max_hp,
@@ -100,42 +103,40 @@ fn spawn_player(mut commands: Commands, art: Res<Art>, profile: Res<Profile>) {
             intro: INTRO_TIME,
             blink: 0.0,
         },
-        Mesh2d(art.player.clone()),
-        MeshMaterial2d(art.mat_base.clone()),
+        Mesh3d(model.paint.clone()),
+        MeshMaterial3d(art.mat_paint.clone()),
         Transform::from_xyz(0.0, -HALF_H - 120.0, z::PLAYER),
         Visibility::default(),
         DespawnOnExit(AppState::Playing),
         children![
             (
-                Mesh2d(art.player.clone()),
-                MeshMaterial2d(art.mat_shadow.clone()),
-                Transform::from_scale(Vec3::splat(0.8)),
-                Shadow {
-                    offset: Vec2::new(30.0, -46.0),
-                },
+                EngineFlame,
+                Mesh3d(art.quad.clone()),
+                MeshMaterial3d(art.mat_engine.clone()),
+                Transform::from_xyz(4.6, -55.0, 0.0).with_scale(Vec3::new(9.0, 18.0, 1.0)),
+                NotShadowCaster,
+                NotShadowReceiver,
             ),
             (
                 EngineFlame,
-                Sprite {
-                    image: art.tex_glow.clone(),
-                    custom_size: Some(Vec2::new(16.0, 36.0)),
-                    color: Color::linear_rgb(3.5, 1.8, 0.7),
-                    ..default()
-                },
-                Transform::from_xyz(0.0, -50.0, -0.1),
+                Mesh3d(art.quad.clone()),
+                MeshMaterial3d(art.mat_engine.clone()),
+                Transform::from_xyz(-4.6, -55.0, 0.0).with_scale(Vec3::new(9.0, 18.0, 1.0)),
+                NotShadowCaster,
+                NotShadowReceiver,
             ),
             (
                 ShieldBubble,
-                Sprite {
-                    image: art.tex_ring.clone(),
-                    custom_size: Some(Vec2::splat(120.0)),
-                    color: Color::linear_rgba(0.6, 1.8, 3.0, 0.0),
-                    ..default()
-                },
-                Transform::from_xyz(0.0, 0.0, 1.0),
+                Mesh3d(art.quad.clone()),
+                MeshMaterial3d(art.mat_shield.clone()),
+                Transform::from_xyz(0.0, 0.0, 12.0).with_scale(Vec3::new(124.0, 124.0, 1.0)),
+                Visibility::Hidden,
+                NotShadowCaster,
+                NotShadowReceiver,
             ),
         ],
-    ));
+    )).id();
+    attach_model_parts(&mut commands, player, &model, &art);
 }
 
 fn player_movement(
@@ -227,7 +228,7 @@ fn player_movement(
     if mouse.pressed(MouseButton::Left) && dir == Vec2::ZERO {
         if let (Ok(window), Ok((cam, cam_t))) = (windows.single(), camera.single()) {
             if let Some(cursor) = window.cursor_position() {
-                if let Ok(world) = cam.viewport_to_world_2d(cam_t, cursor) {
+                if let Some(world) = screen_to_world(cam, cam_t, cursor) {
                     // Aim slightly above the cursor so the plane isn't hidden under it.
                     let goal = world + Vec2::new(0.0, 40.0);
                     let delta = goal - t.translation.truncate();
@@ -305,22 +306,21 @@ fn player_weapons(
         let total = player.cannon + player.power;
         let damage = 1.0 + 0.22 * player.cannon as f32 + 0.12 * player.power as f32;
         let width = 8.0 + total.min(8) as f32 * 0.6;
-        let color = if player.power >= 2 {
-            LinearRgba::rgb(1.6, 3.0, 3.6)
+        let (color, material) = if player.power >= 2 {
+            (LinearRgba::rgb(1.6, 3.0, 3.6), art.mat_tracer_power.clone())
         } else {
-            LinearRgba::rgb(3.6, 2.9, 1.1)
+            (LinearRgba::rgb(3.6, 2.9, 1.1), art.mat_tracer.clone())
         };
         for &(dx, deg) in cannon_pattern(total) {
             let dir = Vec2::from_angle(std::f32::consts::FRAC_PI_2 - deg.to_radians());
             commands.spawn((
-                Sprite {
-                    image: art.tex_streak.clone(),
-                    custom_size: Some(Vec2::new(width, 34.0)),
-                    color: Color::LinearRgba(color),
-                    ..default()
-                },
+                Mesh3d(art.quad.clone()),
+                MeshMaterial3d(material.clone()),
+                NotShadowCaster,
+                NotShadowReceiver,
                 Transform::from_translation((pos + Vec2::new(dx, 36.0)).extend(z::PLAYER_SHOT))
-                    .with_rotation(Quat::from_rotation_z(dir.to_angle() - std::f32::consts::FRAC_PI_2)),
+                    .with_rotation(Quat::from_rotation_z(dir.to_angle() - std::f32::consts::FRAC_PI_2))
+                    .with_scale(Vec3::new(width, 34.0, 1.0)),
                 Velocity(dir * 1450.0),
                 PlayerShot { damage, radius: 8.0 },
                 Offscreen::new(40.0),
@@ -330,7 +330,7 @@ fn player_weapons(
         effects::puff(
             &mut commands,
             &art,
-            pos + Vec2::new(0.0, 46.0),
+            (pos + Vec2::new(0.0, 50.0)).extend(z::PLAYER + 8.0),
             Vec2::Y * 60.0,
             0.06,
             (26.0, 12.0),
@@ -346,10 +346,10 @@ fn player_weapons(
             let damage = 5.0 + 3.0 * player.missiles as f32;
             for side in [-1.0f32, 1.0] {
                 let vel = Vec2::new(side * 260.0, 120.0);
-                commands.spawn((
-                    Mesh2d(art.missile.clone()),
-                    MeshMaterial2d(art.mat_base.clone()),
-                    Transform::from_translation((pos + Vec2::new(side * 30.0, -8.0)).extend(z::PLAYER_SHOT + 0.5)),
+                let missile = commands.spawn((
+                    Mesh3d(art.missile.paint.clone()),
+                    MeshMaterial3d(art.mat_paint.clone()),
+                    Transform::from_translation((pos + Vec2::new(side * 30.0, -8.0)).extend(z::PLAYER - 6.0)),
                     Missile {
                         damage,
                         target: None,
@@ -359,7 +359,8 @@ fn player_weapons(
                     },
                     Offscreen::new(80.0),
                     DespawnOnExit(AppState::Playing),
-                ));
+                )).id();
+                attach_model_parts(&mut commands, missile, &art.missile, &art);
             }
             sfx.write(PlaySfx::new(Sfx::Missile));
         }
@@ -452,15 +453,7 @@ fn steer_missiles(
         m.trail -= dt;
         if m.trail <= 0.0 {
             m.trail = 0.025;
-            effects::puff(
-                &mut commands,
-                &art,
-                pos - dir * 12.0,
-                -dir * 20.0,
-                0.3,
-                (12.0, 22.0),
-                LinearRgba::new(1.6, 1.0, 0.6, 0.6),
-            );
+            effects::smoke_puff(&mut commands, &art, (pos - dir * 12.0).extend(t.translation.z - 1.0), -dir * 20.0, 0.45, (10.0, 26.0), 0.5);
         }
     }
 }
@@ -474,18 +467,21 @@ fn player_visuals(
     time: Res<Time>,
     mut rng: ResMut<Rng>,
     mut players: Query<(&mut Player, &mut Transform, &mut Visibility, &Children)>,
+    art: Res<Art>,
     mut flames: Query<&mut Transform, (With<EngineFlame>, Without<Player>, Without<ShieldBubble>)>,
-    mut bubbles: Query<(&mut Transform, &mut Sprite), (With<ShieldBubble>, Without<Player>, Without<EngineFlame>)>,
+    mut bubbles: Query<
+        (&mut Transform, &mut MeshMaterial3d<StandardMaterial>, &mut Visibility),
+        (With<ShieldBubble>, Without<Player>, Without<EngineFlame>),
+    >,
 ) {
     let dt = time.delta_secs();
     let Ok((mut player, mut t, mut vis, children)) = players.single_mut() else { return };
     player.invuln = (player.invuln - dt).max(0.0);
     player.shield = (player.shield - dt).max(0.0);
 
-    // Bank into turns by squashing the plane horizontally.
+    // Roll into turns: the right wing dips when moving right.
     let bank = (player.vel.x / PLAYER_SPEED).clamp(-1.0, 1.0);
-    t.scale.x = 1.0 - bank.abs() * 0.22;
-    t.rotation = Quat::from_rotation_z(-bank * 0.06);
+    t.rotation = Quat::from_rotation_y(bank * 0.75);
 
     // Blink while invulnerable after a hit (but not during the intro or shield).
     if player.invuln > 0.0 && player.controllable() && player.shield <= 0.0 {
@@ -503,25 +499,22 @@ fn player_visuals(
     for child in children.iter() {
         if let Ok(mut ft) = flames.get_mut(child) {
             let flicker = rng.range(0.85, 1.15);
-            ft.scale = Vec3::new(1.0, thrust * flicker, 1.0);
-            ft.translation.y = -48.0 - 8.0 * thrust * flicker;
+            ft.scale = Vec3::new(9.0, 18.0 * thrust * flicker, 1.0);
+            ft.translation.y = -51.0 - 9.0 * thrust * flicker;
         }
-        if let Ok((mut bt, mut sprite)) = bubbles.get_mut(child) {
+        if let Ok((mut bt, mut mat, mut bubble_vis)) = bubbles.get_mut(child) {
             let on = player.shield > 0.0;
             let fading = player.shield < 1.5 && (player.shield * 10.0) as i32 % 2 == 0;
-            let alpha = if !on {
-                0.0
-            } else if fading {
-                0.25
-            } else {
-                0.9
-            };
-            // Only touch the sprite when it actually changes (see effects.rs).
-            if sprite.color.alpha() != alpha {
-                sprite.color.set_alpha(alpha);
+            let want_vis = if on { Visibility::Inherited } else { Visibility::Hidden };
+            if *bubble_vis != want_vis {
+                *bubble_vis = want_vis;
             }
-            let pulse = 1.0 + 0.05 * (time.elapsed_secs() * 8.0).sin();
-            bt.scale = Vec3::splat(pulse);
+            let want = if fading { &art.mat_shield_dim } else { &art.mat_shield };
+            if mat.0 != *want {
+                mat.0 = want.clone();
+            }
+            let pulse = 124.0 * (1.0 + 0.05 * (time.elapsed_secs() * 8.0).sin());
+            bt.scale = Vec3::new(pulse, pulse, 1.0);
         }
     }
 }

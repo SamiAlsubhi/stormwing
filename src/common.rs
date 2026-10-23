@@ -8,25 +8,22 @@ pub const ARENA: Vec2 = Vec2::new(720.0, 1080.0);
 pub const HALF_W: f32 = ARENA.x / 2.0;
 pub const HALF_H: f32 = ARENA.y / 2.0;
 
-/// Draw order (z) for each layer of the scene.
+/// Altitude (z) of each layer. The camera looks straight down from above, so
+/// higher things are drawn over lower ones and cast shadows onto them.
 pub mod z {
-    pub const WATER_FX: f32 = 1.0;
-    pub const ISLAND: f32 = 2.0;
-    pub const SCORCH: f32 = 3.0;
-    pub const GROUND_UNIT: f32 = 4.0;
-    pub const SURVIVOR: f32 = 5.0;
-    pub const SHADOW: f32 = 6.0;
-    pub const PICKUP: f32 = 14.0;
-    pub const ENEMY: f32 = 16.0;
-    pub const BOSS: f32 = 15.0;
-    pub const PLAYER: f32 = 20.0;
-    pub const PLAYER_SHOT: f32 = 22.0;
-    pub const ENEMY_SHOT: f32 = 26.0;
-    pub const FX: f32 = 30.0;
-    pub const CLOUD: f32 = 40.0;
-    pub const TEXT: f32 = 45.0;
-    pub const FLASH: f32 = 60.0;
-    pub const MASK: f32 = 90.0;
+    pub const SEA_FLOOR: f32 = -22.4;
+    pub const WATER: f32 = 0.0;
+    pub const CLOUD_SHADOW: f32 = 50.0;
+    pub const CLOUD_LOW: f32 = 78.0;
+    pub const PICKUP: f32 = 100.0;
+    pub const BOSS: f32 = 112.0;
+    pub const ENEMY: f32 = 132.0;
+    pub const PLAYER: f32 = 150.0;
+    pub const FX: f32 = 170.0;
+    pub const CLOUD_HIGH: f32 = 215.0;
+    pub const PLAYER_SHOT: f32 = 240.0;
+    pub const ENEMY_SHOT: f32 = 250.0;
+    pub const MASK: f32 = 900.0;
 }
 
 #[derive(Component, Deref, DerefMut, Default, Clone, Copy)]
@@ -73,13 +70,6 @@ pub struct HitFlash {
     pub timer: f32,
 }
 
-/// A drop shadow cast onto the ground, drawn as a child of a flying object.
-#[derive(Component)]
-pub struct Shadow {
-    /// World-space offset from the owner.
-    pub offset: Vec2,
-}
-
 /// Current ground scroll speed in units per second.
 #[derive(Resource)]
 pub struct ScrollSpeed(pub f32);
@@ -88,6 +78,13 @@ impl Default for ScrollSpeed {
     fn default() -> Self {
         Self(70.0)
     }
+}
+
+/// Total distance the ground has scrolled since the scenery was reset, so
+/// endless terrain (the dune field) can be sampled seamlessly.
+#[derive(Resource, Default)]
+pub struct GroundScroll {
+    pub distance: f32,
 }
 
 /// Screen shake, accumulated as "trauma" in `[0, 1]`.
@@ -105,7 +102,9 @@ impl Shake {
 #[derive(Component)]
 pub struct MainCamera;
 
-/// Gameplay systems run in this order, and only while a stage is running.
+/// Gameplay systems run in this order. Input, spawning, combat and
+/// resolution only run while a stage is being played; movement and cleanup
+/// also run in the menus so the scenery keeps scrolling behind them.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GameSet {
     Input,
@@ -120,7 +119,9 @@ pub struct CommonPlugin;
 
 impl Plugin for CommonPlugin {
     fn build(&self, app: &mut App) {
+        let running = in_state(PlayState::Running);
         app.init_resource::<ScrollSpeed>()
+            .init_resource::<GroundScroll>()
             .init_resource::<Shake>()
             .insert_resource(crate::rng::Rng::from_time())
             .configure_sets(
@@ -133,16 +134,15 @@ impl Plugin for CommonPlugin {
                     GameSet::Resolve,
                     GameSet::Cleanup,
                 )
-                    .chain()
-                    .run_if(in_state(PlayState::Running)),
+                    .chain(),
             )
-            .add_systems(
-                Update,
-                (move_velocity, scroll_with_ground)
-                    .in_set(GameSet::Move),
-            )
-            .add_systems(Update, (despawn_offscreen,).in_set(GameSet::Cleanup))
-            .add_systems(Update, (update_hit_flash, update_shadows));
+            .configure_sets(Update, GameSet::Input.run_if(running.clone()))
+            .configure_sets(Update, GameSet::Spawn.run_if(running.clone()))
+            .configure_sets(Update, GameSet::Combat.run_if(running.clone()))
+            .configure_sets(Update, GameSet::Resolve.run_if(running))
+            .add_systems(Update, (move_velocity, scroll_with_ground).in_set(GameSet::Move))
+            .add_systems(Update, despawn_offscreen.in_set(GameSet::Cleanup))
+            .add_systems(Update, update_hit_flash);
     }
 }
 
@@ -156,9 +156,11 @@ fn move_velocity(time: Res<Time>, mut q: Query<(&mut Transform, &Velocity)>) {
 fn scroll_with_ground(
     time: Res<Time>,
     speed: Res<ScrollSpeed>,
+    mut ground: ResMut<GroundScroll>,
     mut q: Query<&mut Transform, With<Scrolls>>,
 ) {
     let dy = speed.0 * time.delta_secs();
+    ground.distance += dy;
     for mut t in &mut q {
         t.translation.y -= dy;
     }
@@ -180,7 +182,7 @@ fn despawn_offscreen(mut commands: Commands, q: Query<(Entity, &Transform, &Offs
 fn update_hit_flash(
     time: Res<Time>,
     art: Res<crate::art::Art>,
-    mut q: Query<(&mut HitFlash, &mut MeshMaterial2d<ColorMaterial>)>,
+    mut q: Query<(&mut HitFlash, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     for (mut flash, mut mat) in &mut q {
         if flash.timer > 0.0 {
@@ -188,7 +190,7 @@ fn update_hit_flash(
             let want = if flash.timer > 0.0 {
                 &art.mat_flash
             } else {
-                &art.mat_base
+                &art.mat_paint
             };
             if mat.0 != *want {
                 mat.0 = want.clone();
@@ -197,23 +199,35 @@ fn update_hit_flash(
     }
 }
 
-/// Keeps each shadow at a fixed world-space offset from its owner, even when
-/// the owner rotates or banks.
-fn update_shadows(
-    parents: Query<&Transform, Without<Shadow>>,
-    mut shadows: Query<(&Shadow, &ChildOf, &mut Transform)>,
-) {
-    for (shadow, child_of, mut t) in &mut shadows {
-        let Ok(parent) = parents.get(child_of.parent()) else {
-            continue;
-        };
-        let inv = parent.rotation.inverse();
-        let local = inv * shadow.offset.extend(0.0);
-        let scale = parent.scale.truncate().max(Vec2::splat(0.01));
-        t.translation = Vec3::new(local.x / scale.x, local.y / scale.y, z::SHADOW - parent.translation.z);
-    }
+/// World position (on the ground plane) under a point on the screen.
+pub fn screen_to_world(camera: &Camera, camera_transform: &GlobalTransform, screen: Vec2) -> Option<Vec2> {
+    camera
+        .viewport_to_world(camera_transform, screen)
+        .ok()
+        .map(|ray| ray.origin.truncate())
 }
 
 pub fn flash(f: &mut HitFlash) {
     f.timer = 0.06;
+}
+
+/// Spawns a model's glass and glow parts as children of `entity`.
+pub fn attach_model_parts(
+    commands: &mut Commands,
+    entity: Entity,
+    set: &crate::art::ModelSet,
+    art: &crate::art::Art,
+) {
+    commands.entity(entity).with_children(|c| {
+        if let Some(glass) = &set.glass {
+            c.spawn((Mesh3d(glass.clone()), MeshMaterial3d(art.mat_glass.clone())));
+        }
+        if let Some(glow) = &set.glow {
+            c.spawn((
+                Mesh3d(glow.clone()),
+                MeshMaterial3d(art.mat_glow.clone()),
+                bevy::light::NotShadowCaster,
+            ));
+        }
+    });
 }

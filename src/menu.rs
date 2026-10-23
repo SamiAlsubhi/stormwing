@@ -1,13 +1,13 @@
 //! Title screen, mission select, hangar (upgrades) and results screens.
 
-use crate::art::Art;
+use crate::art::{player_set, Art, UPGRADE_ANCHORS};
 use crate::audio::{PlaySfx, Sfx};
-use crate::background::THEMES;
+use crate::terrain::THEMES;
 use crate::boss::BOSSES;
-use crate::common::z;
 use crate::save::{Profile, Upgrade, STAGE_COUNT, UPGRADES, UPGRADE_COUNT};
 use crate::state::{AppState, Outcome, PlayState, Run, MEDAL_NAMES};
 use crate::touch::TouchInput;
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::Pressed;
@@ -17,10 +17,13 @@ use bevy::ui_widgets::{Activate, Button};
 pub enum Action {
     Start,
     Hangar,
-    Quit,
     Menu,
     Launch(usize),
-    Buy(usize),
+    /// Select an upgrade in the hangar.
+    Select(usize),
+    /// Buy the selected upgrade.
+    Buy,
+    ToggleMusic,
     Retry,
     Resume,
     Abort,
@@ -34,7 +37,39 @@ pub struct Disabled;
 struct HangarRoot;
 
 #[derive(Component)]
-struct MenuPlane;
+struct Title;
+
+#[derive(Component)]
+struct TitleLetter {
+    index: usize,
+    material: Handle<StandardMaterial>,
+}
+
+#[derive(Component)]
+struct MusicLabel;
+
+/// The jet on display in the hangar.
+#[derive(Component)]
+struct HangarJet;
+
+#[derive(Component)]
+struct UpgradeRow(usize);
+
+#[derive(Component)]
+struct CalloutLabel;
+
+/// Pulsing glow marking the selected part on the hangar jet.
+#[derive(Component)]
+struct CalloutMarker;
+
+/// Which upgrade is selected in the hangar.
+#[derive(Resource, Default)]
+struct HangarSelection(usize);
+
+const TITLE_Y: f32 = 300.0;
+const TITLE_Z: f32 = 600.0;
+const JET_POS: Vec3 = Vec3::new(0.0, 175.0, 560.0);
+const JET_SCALE: f32 = 3.1;
 
 const PANEL: Color = Color::srgba(0.02, 0.05, 0.11, 0.82);
 const ACCENT: Color = Color::srgb(0.45, 0.85, 1.0);
@@ -54,7 +89,11 @@ impl Plugin for MenuPlugin {
             .add_systems(OnEnter(AppState::StageSelect), spawn_stage_select)
             .add_systems(OnEnter(AppState::Hangar), spawn_hangar_screen)
             .add_systems(OnEnter(AppState::Results), spawn_results)
-            .add_systems(Update, (style_buttons, menu_keys, bob_menu_plane, scale_ui, tap_buttons))
+            .init_resource::<HangarSelection>()
+            .add_systems(Startup, configure_gizmos)
+            .add_systems(Update, (style_buttons, style_upgrade_rows, menu_keys, scale_ui, tap_buttons))
+            .add_systems(Update, animate_title.run_if(in_state(AppState::Menu)))
+            .add_systems(Update, (animate_hangar_jet, draw_callout).chain().run_if(in_state(AppState::Hangar)))
             .add_observer(on_activate);
     }
 }
@@ -207,7 +246,7 @@ fn medal(art: &Art, earned: bool, size: f32) -> impl Bundle {
 fn style_buttons(
     mut q: Query<
         (&Hovered, Has<Pressed>, Has<Disabled>, &mut BackgroundColor, &mut BorderColor),
-        With<Action>,
+        (With<Action>, Without<UpgradeRow>),
     >,
 ) {
     for (hovered, pressed, disabled, mut bg, mut border) in &mut q {
@@ -256,96 +295,195 @@ fn scale_ui(windows: Query<&Window>, mut scale: ResMut<UiScale>) {
 // Screens
 // ---------------------------------------------------------------------------
 
-fn spawn_main_menu(mut commands: Commands, art: Res<Art>, profile: Res<Profile>, touch: Res<TouchInput>) {
-    commands.spawn((
-        Mesh2d(art.player.clone()),
-        MeshMaterial2d(art.mat_base.clone()),
-        Transform::from_xyz(0.0, -440.0, z::PLAYER).with_scale(Vec3::splat(1.4)),
-        MenuPlane,
-        DespawnOnExit(AppState::Menu),
-        children![
-            (
-                Mesh2d(art.player.clone()),
-                MeshMaterial2d(art.mat_shadow.clone()),
-                Transform::from_xyz(30.0, -40.0, -14.0).with_scale(Vec3::splat(0.8)),
-            ),
-            (
-                Sprite {
-                    image: art.tex_glow.clone(),
-                    custom_size: Some(Vec2::new(16.0, 40.0)),
-                    color: Color::linear_rgb(3.5, 1.8, 0.7),
-                    ..default()
-                },
-                Transform::from_xyz(0.0, -52.0, -0.1),
-            ),
-        ],
-    ));
-
-    commands.spawn(screen_root(AppState::Menu)).with_children(|root| {
-        root.spawn((
+fn spawn_main_menu(
+    mut commands: Commands,
+    art: Res<Art>,
+    profile: Res<Profile>,
+    touch: Res<TouchInput>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    spawn_title(&mut commands, &art, &mut materials);
+    commands
+        .spawn((
             Node {
-                flex_direction: FlexDirection::Column,
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                margin: UiRect::bottom(px(30)),
                 ..default()
             },
-            children![
-                text("STORMWING", 72.0, GOLD),
-                text("ARCADE SKY COMBAT", 18.0, ACCENT),
-            ],
-        ));
-        root.spawn(panel()).with_children(|p| {
-            p.spawn(star_count(&art, profile.stars, 26.0));
-            p.spawn(text(
-                format!("Medals {}/{}", profile.medal_count(), STAGE_COUNT * 4),
-                15.0,
-                DIM,
-            ));
-            p.spawn(Node {
-                height: px(6),
-                ..default()
-            });
-            p.spawn(button("Start Mission", Action::Start, 280.0));
-            p.spawn(button("Hangar", Action::Hangar, 280.0));
-            // Browsers can't be closed from inside the page.
-            if !cfg!(target_arch = "wasm32") {
-                p.spawn(button("Quit", Action::Quit, 280.0));
-            }
+            DespawnOnExit(AppState::Menu),
+        ))
+        .with_children(|outer| {
+            outer
+                .spawn(Node {
+                    width: px(600),
+                    height: px(900),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|root| {
+                    // The 3D title floats above this; the tagline sits under it.
+                    root.spawn((
+                        Node {
+                            margin: UiRect::top(px(292)),
+                            ..default()
+                        },
+                        text("ARCADE SKY COMBAT", 18.0, ACCENT),
+                    ));
+                    root.spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: px(16),
+                        margin: UiRect::top(px(110)),
+                        ..default()
+                    })
+                    .with_children(|col| {
+                        col.spawn(big_button("Missions", Action::Start));
+                        col.spawn(big_button("Upgrades", Action::Hangar));
+                    });
+                    // Music toggle (sound effects stay on).
+                    root.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            bottom: px(28),
+                            ..default()
+                        },
+                        children![(
+                            Button,
+                            Hovered::default(),
+                            Action::ToggleMusic,
+                            Node {
+                                width: px(170),
+                                height: px(40),
+                                border: UiRect::all(px(2)),
+                                justify_content: JustifyContent::Center,
+                                align_items: AlignItems::Center,
+                                border_radius: BorderRadius::all(px(20)),
+                                ..default()
+                            },
+                            BorderColor::all(ACCENT.with_alpha(0.5)),
+                            BackgroundColor(BTN),
+                            children![(
+                                MusicLabel,
+                                Text::new(music_label(&profile)),
+                                TextFont {
+                                    font_size: FontSize::Px(15.0),
+                                    ..default()
+                                },
+                                TextColor(Color::WHITE),
+                                Pickable::IGNORE,
+                            )],
+                        )],
+                    ));
+                    let hint = if touch.show_touch_hints() {
+                        "Drag to fly - lift to pause - 2nd finger bombs"
+                    } else {
+                        "WASD / mouse to fly - Space bomb - Esc pause"
+                    };
+                    root.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            bottom: px(84),
+                            ..default()
+                        },
+                        text(hint, 13.0, DIM),
+                    ));
+                });
         });
-        let hints: &[&str] = if touch.show_touch_hints() {
-            &[
-                "Drag one finger anywhere to fly",
-                "Lift your finger to pause",
-                "Tap with a second finger to drop a bomb",
-            ]
-        } else {
-            &[
-                "Move: WASD / arrows / hold left mouse / gamepad",
-                "Shift: precise flying   Space / right click: bomb",
-                "Esc: pause   M: mute",
-            ]
-        };
-        root.spawn(Node {
-            margin: UiRect::top(px(16)),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: px(4),
-            ..default()
-        })
-        .with_children(|h| {
-            for line in hints {
-                h.spawn(text(*line, 14.0, DIM));
-            }
-        });
-    });
 }
 
-fn bob_menu_plane(time: Res<Time>, mut q: Query<&mut Transform, With<MenuPlane>>) {
-    for mut t in &mut q {
-        let s = time.elapsed_secs();
-        t.translation.x = (s * 0.6).sin() * 30.0;
-        t.translation.y = -440.0 + (s * 1.1).sin() * 10.0;
-        t.scale.x = 1.4 * (1.0 - ((s * 0.6).cos() * 0.12).abs());
+fn music_label(profile: &Profile) -> String {
+    if profile.music_on { "MUSIC: ON".into() } else { "MUSIC: OFF".into() }
+}
+
+fn big_button(label: &str, action: Action) -> impl Bundle {
+    (
+        Button,
+        Hovered::default(),
+        action,
+        Node {
+            width: px(300),
+            height: px(64),
+            border: UiRect::all(px(2)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border_radius: BorderRadius::all(px(14)),
+            ..default()
+        },
+        BorderColor::all(ACCENT.with_alpha(0.5)),
+        BackgroundColor(BTN),
+        BoxShadow::new(Color::srgba(0.0, 0.0, 0.0, 0.45), px(0), px(4), px(0), px(10)),
+        children![(
+            Text::new(label.to_uppercase()),
+            TextFont {
+                font_size: FontSize::Px(26.0),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            TextShadow {
+                offset: Vec2::new(0.0, 2.0),
+                color: Color::srgba(0.0, 0.0, 0.0, 0.5),
+            },
+            Pickable::IGNORE,
+        )],
+    )
+}
+
+/// The game's name in floating 3D gold letters, high above the sea.
+fn spawn_title(commands: &mut Commands, art: &Art, materials: &mut Assets<StandardMaterial>) {
+    let title = commands
+        .spawn((
+            Title,
+            Transform::from_xyz(0.0, TITLE_Y, TITLE_Z).with_scale(Vec3::splat(1.3)),
+            Visibility::default(),
+            DespawnOnExit(AppState::Menu),
+        ))
+        .id();
+    for (index, (mesh, x)) in art.title_letters.iter().enumerate() {
+        let material = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.55, 0.27, 0.02),
+            emissive: LinearRgba::rgb(0.06, 0.025, 0.0),
+            metallic: 0.5,
+            perceptual_roughness: 0.35,
+            reflectance: 0.5,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(*x, 0.0, 0.0),
+            TitleLetter { index, material },
+            NotShadowCaster,
+            ChildOf(title),
+        ));
+    }
+}
+
+/// Floats and tilts the title, with a glint sweeping across the letters.
+fn animate_title(
+    time: Res<Time<Real>>,
+    mut titles: Query<&mut Transform, (With<Title>, Without<TitleLetter>)>,
+    mut letters: Query<(&TitleLetter, &mut Transform), Without<Title>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let s = time.elapsed_secs();
+    for mut t in &mut titles {
+        t.translation.y = TITLE_Y + (s * 0.8).sin() * 9.0;
+        t.rotation = Quat::from_rotation_x((s * 0.55).sin() * 0.16) * Quat::from_rotation_y((s * 0.4).sin() * 0.14);
+    }
+    let sweep = (s / 3.2).fract() * 1.8 - 0.3;
+    for (letter, mut t) in &mut letters {
+        let k = letter.index as f32 / 8.0;
+        t.translation.y = ((s * 1.8) + letter.index as f32 * 0.55).sin() * 3.0;
+        t.translation.z = ((s * 1.3) + letter.index as f32 * 0.7).sin() * 4.0;
+        let glint = (-((sweep - k) * (sweep - k)) / 0.006).exp();
+        let shimmer = 0.15 * ((s * 3.0) + letter.index as f32).sin().abs();
+        if let Some(mut m) = materials.get_mut(&letter.material) {
+            m.emissive = LinearRgba::rgb(0.06 + shimmer * 0.5 + 2.4 * glint, 0.025 + shimmer * 0.25 + 1.4 * glint, 0.3 * glint);
+        }
     }
 }
 
@@ -418,100 +556,328 @@ fn spawn_stage_select(mut commands: Commands, art: Res<Art>, profile: Res<Profil
     });
 }
 
-fn spawn_hangar_screen(mut commands: Commands, art: Res<Art>, profile: Res<Profile>) {
-    spawn_hangar(&mut commands, &art, &profile);
+fn spawn_hangar_screen(
+    mut commands: Commands,
+    art: Res<Art>,
+    profile: Res<Profile>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut selection: ResMut<HangarSelection>,
+) {
+    selection.0 = selection.0.min(UPGRADE_COUNT - 1);
+    spawn_hangar_jet(&mut commands, &art, &mut meshes, &profile);
+    spawn_hangar(&mut commands, &art, &profile, selection.0);
 }
 
-fn spawn_hangar(commands: &mut Commands, art: &Art, profile: &Profile) {
+/// The player's jet, showing its current upgrades, on a slow turntable.
+fn spawn_hangar_jet(commands: &mut Commands, art: &Art, meshes: &mut Assets<Mesh>, profile: &Profile) {
+    let set = player_set(meshes, profile.upgrades);
+    let jet = commands
+        .spawn((
+            HangarJet,
+            Mesh3d(set.paint.clone()),
+            MeshMaterial3d(art.mat_paint.clone()),
+            Transform::from_translation(JET_POS).with_scale(Vec3::splat(JET_SCALE)),
+            DespawnOnExit(AppState::Hangar),
+        ))
+        .id();
+    crate::common::attach_model_parts(commands, jet, &set, art);
+    commands.spawn((
+        CalloutMarker,
+        Mesh3d(art.quad.clone()),
+        MeshMaterial3d(art.mat_star_halo.clone()),
+        Transform::from_translation(JET_POS + Vec3::Z * 60.0).with_scale(Vec3::new(60.0, 60.0, 1.0)),
+        NotShadowCaster,
+        NotShadowReceiver,
+        DespawnOnExit(AppState::Hangar),
+    ));
+}
+
+fn spawn_hangar(commands: &mut Commands, art: &Art, profile: &Profile, selected: usize) {
     commands
-        .spawn((screen_root(AppState::Hangar), HangarRoot))
-        .with_children(|root| {
-            root.spawn(text("HANGAR", 40.0, Color::WHITE));
-            root.spawn(star_count(art, profile.stars, 24.0));
-            for i in 0..UPGRADE_COUNT {
-                let u = upgrade_from_index(i);
-                let info = &UPGRADES[i];
-                let level = profile.level(u);
-                let cost = profile.next_cost(u);
-                let affordable = cost.is_some_and(|c| profile.stars >= c);
-                root.spawn((
-                    Node {
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                width: percent(100),
+                height: percent(100),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            HangarRoot,
+            DespawnOnExit(AppState::Hangar),
+        ))
+        .with_children(|outer| {
+            outer
+                .spawn(Node {
+                    width: px(600),
+                    height: px(900),
+                    ..default()
+                })
+                .with_children(|root| {
+                    root.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            top: px(20),
+                            left: px(24),
+                            ..default()
+                        },
+                        text("UPGRADES", 34.0, Color::WHITE),
+                    ));
+                    root.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            top: px(24),
+                            right: px(24),
+                            ..default()
+                        },
+                        children![star_count(art, profile.stars, 26.0)],
+                    ));
+                    // Label at the end of the callout line, placed each frame.
+                    root.spawn((
+                        CalloutLabel,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(-400),
+                            ..default()
+                        },
+                        text("", 15.0, GOLD),
+                    ));
+
+                    // Upgrade list.
+                    root.spawn(Node {
+                        position_type: PositionType::Absolute,
+                        top: px(426),
+                        left: px(30),
                         width: px(540),
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::SpaceBetween,
-                        padding: UiRect::axes(px(14), px(10)),
-                        border_radius: BorderRadius::all(px(12)),
-                        ..default()
-                    },
-                    BackgroundColor(PANEL),
-                ))
-                .with_children(|row| {
-                    row.spawn(Node {
                         flex_direction: FlexDirection::Column,
-                        row_gap: px(3),
+                        row_gap: px(6),
                         ..default()
                     })
-                    .with_children(|col| {
-                        col.spawn(text(info.name, 20.0, Color::WHITE));
-                        col.spawn(text(info.blurb, 13.0, DIM));
-                        col.spawn(Node {
-                            column_gap: px(4),
-                            margin: UiRect::top(px(3)),
-                            ..default()
-                        })
-                        .with_children(|pips| {
-                            for k in 0..u.max_level() {
-                                pips.spawn((
+                    .with_children(|list| {
+                        for i in 0..UPGRADE_COUNT {
+                            let u = upgrade_from_index(i);
+                            let level = profile.level(u);
+                            let cost = profile.next_cost(u);
+                            list.spawn((
+                                Button,
+                                Hovered::default(),
+                                Action::Select(i),
+                                UpgradeRow(i),
+                                Node {
+                                    height: px(50),
+                                    padding: UiRect::axes(px(14), px(6)),
+                                    border: UiRect::all(px(2)),
+                                    border_radius: BorderRadius::all(px(12)),
+                                    align_items: AlignItems::Center,
+                                    justify_content: JustifyContent::SpaceBetween,
+                                    ..default()
+                                },
+                                BorderColor::all(ACCENT.with_alpha(0.2)),
+                                BackgroundColor(PANEL),
+                            ))
+                            .with_children(|row| {
+                                row.spawn((
                                     Node {
-                                        width: px(22),
-                                        height: px(8),
-                                        border_radius: BorderRadius::all(px(3)),
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: px(4),
                                         ..default()
                                     },
-                                    BackgroundColor(if k < level { ACCENT } else { Color::srgba(1.0, 1.0, 1.0, 0.15) }),
-                                ));
-                            }
-                        });
+                                    Pickable::IGNORE,
+                                ))
+                                .with_children(|col| {
+                                    col.spawn((text(UPGRADES[i].name, 18.0, Color::WHITE), Pickable::IGNORE));
+                                    col.spawn((
+                                        Node {
+                                            column_gap: px(4),
+                                            ..default()
+                                        },
+                                        Pickable::IGNORE,
+                                    ))
+                                    .with_children(|pips| {
+                                        for k in 0..u.max_level() {
+                                            pips.spawn((
+                                                Node {
+                                                    width: px(20),
+                                                    height: px(6),
+                                                    border_radius: BorderRadius::all(px(3)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(if k < level { GOLD } else { Color::srgba(1.0, 1.0, 1.0, 0.15) }),
+                                                Pickable::IGNORE,
+                                            ));
+                                        }
+                                    });
+                                });
+                                match cost {
+                                    Some(c) => {
+                                        let color = if profile.stars >= c { GOLD } else { DIM };
+                                        row.spawn((
+                                            Node {
+                                                align_items: AlignItems::Center,
+                                                column_gap: px(5),
+                                                ..default()
+                                            },
+                                            Pickable::IGNORE,
+                                            children![
+                                                (
+                                                    ImageNode::new(art.tex_star_icon.clone()),
+                                                    Node {
+                                                        width: px(18),
+                                                        height: px(18),
+                                                        ..default()
+                                                    },
+                                                    Pickable::IGNORE,
+                                                ),
+                                                (text(c.to_string(), 17.0, color), Pickable::IGNORE),
+                                            ],
+                                        ));
+                                    }
+                                    None => {
+                                        row.spawn((text("MAX", 17.0, ACCENT), Pickable::IGNORE));
+                                    }
+                                }
+                            });
+                        }
                     });
-                    let label = match cost {
-                        Some(c) => format!("{c}"),
-                        None => "MAX".to_string(),
-                    };
-                    row.spawn(Node {
+
+                    // Details of the selected upgrade and the buy button.
+                    let u = upgrade_from_index(selected);
+                    let cost = profile.next_cost(u);
+                    let affordable = cost.is_some_and(|c| profile.stars >= c);
+                    root.spawn(Node {
+                        position_type: PositionType::Absolute,
+                        top: px(718),
+                        left: px(30),
+                        width: px(540),
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
-                        row_gap: px(2),
+                        row_gap: px(10),
                         ..default()
                     })
-                    .with_children(|col| {
-                        if cost.is_some() {
-                            col.spawn(star_count(art, cost.unwrap_or(0), 16.0));
-                        }
-                        let mut b = col.spawn(small_button(
-                            if cost.is_some() { "Upgrade" } else { &label },
-                            Action::Buy(i),
-                            120.0,
-                            affordable,
-                        ));
-                        if !affordable {
-                            b.insert(Disabled);
-                        }
+                    .with_children(|d| {
+                        d.spawn(text(UPGRADES[selected].blurb, 15.0, DIM));
+                        d.spawn(Node {
+                            column_gap: px(12),
+                            ..default()
+                        })
+                        .with_children(|row| {
+                            row.spawn(button("Back", Action::Menu, 150.0));
+                            let label = match cost {
+                                Some(c) => format!("Upgrade  {c}"),
+                                None => "Maxed out".to_string(),
+                            };
+                            let mut b = row.spawn(button(&label, Action::Buy, 220.0));
+                            if !affordable {
+                                b.insert(Disabled);
+                            }
+                            row.spawn(button("Missions", Action::Start, 150.0));
+                        });
                     });
                 });
-            }
-            root.spawn(Node {
-                height: px(4),
-                ..default()
-            });
-            root.spawn(Node {
-                column_gap: px(12),
-                ..default()
-            })
-            .with_children(|row| {
-                row.spawn(button("Back", Action::Menu, 200.0));
-                row.spawn(button("Missions", Action::Start, 200.0));
-            });
         });
+}
+
+/// Rows highlight on hover; hovering (or tapping) a row selects it.
+fn style_upgrade_rows(
+    mut commands: Commands,
+    art: Option<Res<Art>>,
+    profile: Res<Profile>,
+    mut selection: ResMut<HangarSelection>,
+    roots: Query<Entity, With<HangarRoot>>,
+    mut rows: Query<(&UpgradeRow, &Hovered, &mut BackgroundColor, &mut BorderColor)>,
+) {
+    let mut changed = None;
+    for (row, hovered, mut bg, mut border) in &mut rows {
+        if hovered.get() && selection.0 != row.0 {
+            changed = Some(row.0);
+        }
+        let selected = selection.0 == row.0;
+        let want = if selected {
+            Color::srgba(0.12, 0.22, 0.34, 0.92)
+        } else if hovered.get() {
+            Color::srgba(0.08, 0.16, 0.26, 0.9)
+        } else {
+            PANEL
+        };
+        if bg.0 != want {
+            bg.0 = want;
+        }
+        border.set_all(if selected { GOLD } else { ACCENT.with_alpha(0.2) });
+    }
+    if let (Some(i), Some(art)) = (changed, art) {
+        selection.0 = i;
+        for e in &roots {
+            commands.entity(e).despawn();
+        }
+        spawn_hangar(&mut commands, &art, &profile, i);
+    }
+}
+
+fn animate_hangar_jet(time: Res<Time<Real>>, mut q: Query<&mut Transform, With<HangarJet>>) {
+    let s = time.elapsed_secs();
+    for mut t in &mut q {
+        t.translation = JET_POS + Vec3::new(0.0, (s * 0.9).sin() * 6.0, 0.0);
+        t.rotation = Quat::from_rotation_z((s * 0.35).sin() * 0.18) * Quat::from_rotation_y((s * 0.6).sin() * 0.32);
+    }
+}
+
+/// Draws a line from the selected part of the jet out to its label.
+fn draw_callout(
+    mut gizmos: Gizmos,
+    time: Res<Time<Real>>,
+    selection: Res<HangarSelection>,
+    profile: Res<Profile>,
+    ui_scale: Res<UiScale>,
+    camera: Query<(&Camera, &GlobalTransform), With<crate::common::MainCamera>>,
+    jets: Query<&Transform, (With<HangarJet>, Without<CalloutMarker>)>,
+    mut markers: Query<&mut Transform, (With<CalloutMarker>, Without<HangarJet>)>,
+    mut labels: Query<(&mut Node, &mut Text), With<CalloutLabel>>,
+) {
+    let (Ok(jet), Ok((cam, cam_t))) = (jets.single(), camera.single()) else { return };
+    let i = selection.0.min(UPGRADE_COUNT - 1);
+    let local = UPGRADE_ANCHORS[i];
+    let part = jet.transform_point(local) + Vec3::Z * 40.0;
+    let right = local.x > 1.0;
+    let side = if right { 1.0 } else { -1.0 };
+    let elbow = Vec3::new(part.x + side * 60.0, part.y + 46.0, part.z);
+    let end = Vec3::new(side * 300.0, elbow.y, part.z);
+    let gold = Color::srgb(1.0, 0.82, 0.35);
+    gizmos.line(part, elbow, gold);
+    gizmos.line(elbow, end, gold);
+    let pulse = 9.0 + (time.elapsed_secs() * 5.0).sin() * 2.0;
+    gizmos.circle(Isometry3d::from_translation(part), pulse, gold);
+    if let Ok(mut m) = markers.single_mut() {
+        m.translation = part - Vec3::Z * 2.0;
+        let k = 44.0 + pulse * 2.0;
+        m.scale = Vec3::new(k, k, 1.0);
+    }
+    if let Ok((mut node, mut label)) = labels.single_mut() {
+        let u = upgrade_from_index(i);
+        let value = format!("{}  {}/{}", UPGRADES[i].name.to_uppercase(), profile.level(u), u.max_level());
+        if label.0 != value {
+            label.0 = value;
+        }
+        if let Ok(vp) = cam.world_to_viewport(cam_t, end + Vec3::new(-side * 4.0, 6.0, 0.0)) {
+            // Convert to the 600x900 frame (centred in the window).
+            let window = cam.logical_viewport_size().unwrap_or(Vec2::new(600.0, 900.0)) / ui_scale.0;
+            let origin = (window - Vec2::new(600.0, 900.0)) / 2.0;
+            let p = vp / ui_scale.0 - origin;
+            node.top = px(p.y - 22.0);
+            if right {
+                node.left = Val::Auto;
+                node.right = px(600.0 - p.x);
+            } else {
+                node.right = Val::Auto;
+                node.left = px(p.x);
+            }
+        }
+    }
+}
+
+fn configure_gizmos(mut store: ResMut<GizmoConfigStore>) {
+    let (config, _) = store.config_mut::<DefaultGizmoConfigGroup>();
+    config.line.width = 3.0;
+    config.depth_bias = -1.0;
 }
 
 fn upgrade_from_index(i: usize) -> Upgrade {
@@ -630,8 +996,11 @@ fn on_activate(
     mut next: ResMut<NextState<AppState>>,
     next_play: Option<ResMut<NextState<PlayState>>>,
     hangar: Query<Entity, With<HangarRoot>>,
+    jets: Query<Entity, Or<(With<HangarJet>, With<CalloutMarker>)>>,
+    mut music_labels: Query<&mut Text, With<MusicLabel>>,
+    mut selection: ResMut<HangarSelection>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut sfx: MessageWriter<PlaySfx>,
-    mut exit: MessageWriter<AppExit>,
     time: Res<Time<Real>>,
     mut last: Local<Option<(Entity, f64)>>,
 ) {
@@ -652,23 +1021,38 @@ fn on_activate(
     match action {
         Action::Start => next.set(AppState::StageSelect),
         Action::Hangar => next.set(AppState::Hangar),
-        Action::Quit => {
-            exit.write(AppExit::Success);
-        }
         Action::Menu => next.set(AppState::Menu),
         Action::Launch(i) => launch(&mut run, &mut next, &profile, i),
         Action::Retry => {
             let stage = run.stage;
             launch(&mut run, &mut next, &profile, stage);
         }
-        Action::Buy(i) => {
-            if profile.try_buy(upgrade_from_index(i)) {
-                profile.save();
-                sfx.write(PlaySfx::new(Sfx::PowerUp));
+        Action::Select(i) => {
+            if selection.0 != i {
+                selection.0 = i;
                 for e in &hangar {
                     commands.entity(e).despawn();
                 }
-                spawn_hangar(&mut commands, &art, &profile);
+                spawn_hangar(&mut commands, &art, &profile, i);
+            }
+        }
+        Action::Buy => {
+            if profile.try_buy(upgrade_from_index(selection.0)) {
+                profile.save();
+                sfx.write(PlaySfx::new(Sfx::PowerUp));
+                for e in hangar.iter().chain(jets.iter()) {
+                    commands.entity(e).despawn();
+                }
+                spawn_hangar_jet(&mut commands, &art, &mut meshes, &profile);
+                spawn_hangar(&mut commands, &art, &profile, selection.0);
+            }
+        }
+        Action::ToggleMusic => {
+            profile.music_on = !profile.music_on;
+            profile.save();
+            let label = music_label(&profile);
+            for mut t in &mut music_labels {
+                t.0 = label.clone();
             }
         }
         Action::Resume => {

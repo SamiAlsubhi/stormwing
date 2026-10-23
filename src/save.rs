@@ -64,7 +64,10 @@ pub struct Profile {
     pub cleared: [bool; STAGE_COUNT],
     pub medals: [[bool; 4]; STAGE_COUNT],
     pub best: [u32; STAGE_COUNT],
+    /// Mutes everything (M key).
     pub muted: bool,
+    /// Background music on/off (sound effects stay on).
+    pub music_on: bool,
 }
 
 impl Default for Profile {
@@ -77,6 +80,7 @@ impl Default for Profile {
             medals: [[false; 4]; STAGE_COUNT],
             best: [0; STAGE_COUNT],
             muted: false,
+            music_on: true,
         }
     }
 }
@@ -102,10 +106,6 @@ impl Profile {
         }
     }
 
-    pub fn medal_count(&self) -> usize {
-        self.medals.iter().flatten().filter(|m| **m).count()
-    }
-
     pub fn load() -> Self {
         let mut p = Profile::default();
         let Some(text) = storage::read() else { return p };
@@ -119,6 +119,7 @@ impl Profile {
                 "stars" => p.stars = first,
                 "unlocked" => p.unlocked = (first as usize).clamp(1, STAGE_COUNT),
                 "muted" => p.muted = first != 0,
+                "music" => p.music_on = first != 0,
                 "upgrades" => {
                     for (i, n) in nums.iter().enumerate().take(UPGRADE_COUNT) {
                         p.upgrades[i] = (*n as u8).min(UPGRADES[i].costs.len() as u8);
@@ -155,6 +156,7 @@ impl Profile {
         out += &format!("stars={}\n", self.stars);
         out += &format!("unlocked={}\n", self.unlocked);
         out += &format!("muted={}\n", self.muted as u32);
+        out += &format!("music={}\n", self.music_on as u32);
         out += &format!(
             "upgrades={}\n",
             join(&self.upgrades.map(|u| u as u32))

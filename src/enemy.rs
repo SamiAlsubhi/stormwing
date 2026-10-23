@@ -1,6 +1,6 @@
 //! Enemy definitions, movement patterns and guns.
 
-use crate::art::Art;
+use crate::art::{Art, ModelSet};
 use crate::audio::{PlaySfx, Sfx};
 use crate::combat::spawn_enemy_shot;
 use crate::common::*;
@@ -8,6 +8,7 @@ use crate::pickups::PowerKind;
 use crate::player::Player;
 use crate::rng::Rng;
 use crate::state::{AppState, Run};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -84,12 +85,28 @@ pub struct Mover {
     pub t: f32,
     pub face: bool,
     vel: Vec2,
+    /// Direction the nose points (radians, 0 = up the screen).
+    heading: f32,
+    /// Bank angle, leaning into turns.
+    roll: f32,
 }
 
 impl Mover {
-    pub fn new(kind: Move, face: bool) -> Self {
-        Self { kind, t: 0.0, face, vel: Vec2::NEG_Y * 100.0 }
+    pub fn new(kind: Move, face: bool, heading: f32) -> Self {
+        Self {
+            kind,
+            t: 0.0,
+            face,
+            vel: Vec2::NEG_Y * 100.0,
+            heading,
+            roll: 0.0,
+        }
     }
+}
+
+/// Heading of an object from its rotation, ignoring any roll.
+pub fn heading_of(rotation: Quat) -> f32 {
+    (rotation * Vec3::Y).truncate().to_angle() - FRAC_PI_2
 }
 
 #[derive(Clone, Copy)]
@@ -159,7 +176,7 @@ impl Plugin for EnemyPlugin {
             .add_systems(OnEnter(AppState::Playing), |run: Res<Run>, mut c: Commands| {
                 c.insert_resource(Difficulty::for_stage(run.stage));
             })
-            .add_systems(Update, move_enemies.in_set(GameSet::Move))
+            .add_systems(Update, (steer_boats, move_enemies, boat_wakes).chain().in_set(GameSet::Move))
             .add_systems(Update, (aim_barrels, fire_guns).chain().in_set(GameSet::Combat));
     }
 }
@@ -239,13 +256,91 @@ fn move_enemies(
         t.translation.y = new.y;
         if m.face {
             let dir = facing.unwrap_or(new - pos);
+            let mut turn_rate = 0.0;
             if dir.length_squared() > 1e-4 {
                 let want = dir.to_angle() - FRAC_PI_2;
-                let (_, _, current) = t.rotation.to_euler(EulerRot::XYZ);
-                let diff = (want - current + PI).rem_euclid(TAU) - PI;
-                let turn = (10.0 * dt).min(1.0);
-                t.rotation = Quat::from_rotation_z(current + diff * turn);
+                let diff = (want - m.heading + PI).rem_euclid(TAU) - PI;
+                let step = diff * (10.0 * dt).min(1.0);
+                m.heading += step;
+                turn_rate = step / dt;
             }
+            // Bank into turns (turning right = negative rate = right wing down).
+            let want_roll = (-turn_rate * 0.35).clamp(-0.9, 0.9);
+            m.roll += (want_roll - m.roll) * (6.0 * dt).min(1.0);
+            t.rotation = Quat::from_rotation_z(m.heading) * Quat::from_rotation_y(m.roll);
+        }
+    }
+}
+
+/// Boats look ahead and veer around islands, icebergs and their shallows.
+fn steer_boats(
+    time: Res<Time>,
+    islands: Query<(&Transform, &crate::terrain::Footprint), Without<Mover>>,
+    mut boats: Query<(&Enemy, &Transform, &mut Mover)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    const CRUISE: Vec2 = Vec2::new(0.0, 22.0);
+    for (enemy, t, mut mover) in &mut boats {
+        if enemy.kind != EnemyKind::Boat {
+            continue;
+        }
+        let Move::Ground(vel) = mover.kind else { continue };
+        let pos = t.translation.truncate();
+        let mut desired = CRUISE;
+        for (it, fp) in &islands {
+            let centre = it.translation.truncate();
+            let rel = pos - centre;
+            let dist = rel.length();
+            let keep_out = fp.radius * 0.8 + 30.0;
+            // Only land that's ahead of (or level with) the boat matters.
+            if dist > keep_out + 120.0 || centre.y < pos.y - keep_out * 0.5 {
+                continue;
+            }
+            let side = if rel.x >= 0.0 { 1.0 } else { -1.0 };
+            let urgency = (1.0 - (dist - keep_out).max(0.0) / 120.0).clamp(0.0, 1.0);
+            desired.x += side * 70.0 * urgency;
+            if dist < keep_out {
+                desired += rel.normalize_or(Vec2::X) * 50.0;
+            }
+        }
+        let desired = desired.clamp_length_max(60.0);
+        mover.kind = Move::Ground(vel.lerp(desired, (2.0 * dt).min(1.0)));
+    }
+}
+
+/// Boats churn up a white wake behind them.
+fn boat_wakes(
+    mut commands: Commands,
+    time: Res<Time>,
+    art: Res<Art>,
+    mut timer: Local<f32>,
+    boats: Query<(&Enemy, &Transform)>,
+) {
+    *timer -= time.delta_secs();
+    if *timer > 0.0 {
+        return;
+    }
+    *timer = 0.12;
+    for (enemy, t) in &boats {
+        if enemy.kind != EnemyKind::Boat {
+            continue;
+        }
+        let back = t.rotation * Vec3::NEG_Y;
+        let side = t.rotation * Vec3::X;
+        let stern = t.translation + back * 44.0;
+        for s in [-1.0f32, 1.0] {
+            crate::effects::foam(
+                &mut commands,
+                &art,
+                Vec3::new(stern.x, stern.y, 0.6),
+                (side * s * 18.0 + back * 10.0).truncate(),
+                1.6,
+                (10.0, 30.0),
+                0.45,
+            );
         }
     }
 }
@@ -260,7 +355,7 @@ fn aim_barrels(
     for (t, children) in &parents {
         let pos = t.translation.truncate();
         let world_angle = (target - pos).to_angle() - FRAC_PI_2;
-        let (_, _, parent_angle) = t.rotation.to_euler(EulerRot::XYZ);
+        let parent_angle = heading_of(t.rotation);
         for child in children.iter() {
             if let Ok(mut bt) = barrels.get_mut(child) {
                 bt.rotation = Quat::from_rotation_z(world_angle - parent_angle);
@@ -366,19 +461,21 @@ pub struct SpawnCtx<'a> {
     pub rng: &'a mut Rng,
 }
 
-/// Spawns one enemy of `kind`. Returns its entity.
+/// Spawns one enemy of `kind`. Ground units stand at `ground_z`; aircraft
+/// fly at their usual altitude. Returns the entity.
 pub fn spawn_enemy(
     commands: &mut Commands,
     ctx: &mut SpawnCtx,
     kind: EnemyKind,
     pos: Vec2,
+    ground_z: f32,
     mv: Move,
     drop: Option<PowerKind>,
 ) -> Entity {
     let art = ctx.art;
     let d = ctx.diff;
     struct Spec {
-        mesh: Handle<Mesh>,
+        model: ModelSet,
         hp: f32,
         score: u32,
         stars: u32,
@@ -386,14 +483,13 @@ pub fn spawn_enemy(
         size: f32,
         air: bool,
         gun: Option<Gun>,
-        barrel: Option<(Handle<Mesh>, f32)>,
+        barrel: Option<(ModelSet, Vec3)>,
         engines: Vec<(Vec2, Vec2)>,
-        shadow: f32,
         survivor: bool,
     }
     let spec = match kind {
         EnemyKind::Dart => Spec {
-            mesh: art.dart.clone(),
+            model: art.dart.clone(),
             hp: 3.0,
             score: 100,
             stars: 1,
@@ -403,11 +499,10 @@ pub fn spawn_enemy(
             gun: Some(Gun::new(Pattern::Aimed { count: 1, spread: 0.0 }, 2.4, 250.0)),
             barrel: None,
             engines: vec![(Vec2::new(0.0, -26.0), Vec2::new(10.0, 20.0))],
-            shadow: 0.7,
             survivor: false,
         },
         EnemyKind::Swooper => Spec {
-            mesh: art.swooper.clone(),
+            model: art.swooper.clone(),
             hp: 4.0,
             score: 150,
             stars: 2,
@@ -417,11 +512,10 @@ pub fn spawn_enemy(
             gun: Some(Gun::new(Pattern::Aimed { count: 1, spread: 0.0 }, 1.9, 270.0)),
             barrel: None,
             engines: vec![(Vec2::new(0.0, -21.0), Vec2::new(9.0, 18.0))],
-            shadow: 0.7,
             survivor: false,
         },
         EnemyKind::Chaser => Spec {
-            mesh: art.chaser.clone(),
+            model: art.chaser.clone(),
             hp: 2.0,
             score: 120,
             stars: 1,
@@ -431,11 +525,10 @@ pub fn spawn_enemy(
             gun: None,
             barrel: None,
             engines: vec![],
-            shadow: 0.7,
             survivor: false,
         },
         EnemyKind::Gunship => Spec {
-            mesh: art.gunship.clone(),
+            model: art.gunship.clone(),
             hp: 34.0,
             score: 800,
             stars: 8,
@@ -452,11 +545,10 @@ pub fn spawn_enemy(
                 (Vec2::new(30.0, -26.0), Vec2::new(12.0, 22.0)),
                 (Vec2::new(-30.0, -26.0), Vec2::new(12.0, 22.0)),
             ],
-            shadow: 0.6,
             survivor: false,
         },
         EnemyKind::Bomber => Spec {
-            mesh: art.bomber.clone(),
+            model: art.bomber.clone(),
             hp: 80.0,
             score: 1500,
             stars: 16,
@@ -471,11 +563,10 @@ pub fn spawn_enemy(
                 (Vec2::new(63.0, -17.0), Vec2::new(10.0, 18.0)),
                 (Vec2::new(-63.0, -17.0), Vec2::new(10.0, 18.0)),
             ],
-            shadow: 0.55,
             survivor: false,
         },
         EnemyKind::Turret => Spec {
-            mesh: art.turret_base.clone(),
+            model: art.turret_base.clone(),
             hp: 12.0,
             score: 300,
             stars: 3,
@@ -483,13 +574,12 @@ pub fn spawn_enemy(
             size: 26.0,
             air: false,
             gun: Some(Gun::new(Pattern::Aimed { count: 1, spread: 0.0 }, 1.7, 240.0).muzzle(28.0)),
-            barrel: Some((art.turret_barrel.clone(), 0.2)),
+            barrel: Some((art.turret_barrel.clone(), Vec3::ZERO)),
             engines: vec![],
-            shadow: 0.0,
             survivor: false,
         },
         EnemyKind::Tank => Spec {
-            mesh: art.tank_body.clone(),
+            model: art.tank_body.clone(),
             hp: 14.0,
             score: 350,
             stars: 3,
@@ -497,13 +587,12 @@ pub fn spawn_enemy(
             size: 26.0,
             air: false,
             gun: Some(Gun::new(Pattern::Aimed { count: 1, spread: 0.0 }, 2.1, 230.0).muzzle(28.0)),
-            barrel: Some((art.tank_turret.clone(), 0.2)),
+            barrel: Some((art.tank_turret.clone(), Vec3::new(0.0, 2.0, 0.0))),
             engines: vec![],
-            shadow: 0.0,
             survivor: false,
         },
         EnemyKind::Boat => Spec {
-            mesh: art.boat.clone(),
+            model: art.boat.clone(),
             hp: 26.0,
             score: 500,
             stars: 5,
@@ -513,13 +602,12 @@ pub fn spawn_enemy(
             gun: Some(
                 Gun::new(Pattern::Aimed { count: 3, spread: 0.4 }, 2.2, 230.0).muzzle(26.0),
             ),
-            barrel: Some((art.turret_barrel.clone(), 0.2)),
+            barrel: Some((art.turret_barrel.clone(), Vec3::new(0.0, 26.0, 1.0))),
             engines: vec![],
-            shadow: 0.0,
             survivor: false,
         },
         EnemyKind::Hut => Spec {
-            mesh: art.hut.clone(),
+            model: art.hut.clone(),
             hp: 10.0,
             score: 200,
             stars: 2,
@@ -529,11 +617,10 @@ pub fn spawn_enemy(
             gun: None,
             barrel: None,
             engines: vec![],
-            shadow: 0.0,
             survivor: true,
         },
         EnemyKind::Depot => Spec {
-            mesh: art.depot.clone(),
+            model: art.depot.clone(),
             hp: 8.0,
             score: 250,
             stars: 4,
@@ -543,7 +630,6 @@ pub fn spawn_enemy(
             gun: None,
             barrel: None,
             engines: vec![],
-            shadow: 0.0,
             survivor: false,
         },
         EnemyKind::Boss | EnemyKind::BossTurret => unreachable!("bosses are spawned by the boss module"),
@@ -556,7 +642,7 @@ pub fn spawn_enemy(
         Move::Ground(_) => 0.0,
         _ => PI,
     };
-    let z = if spec.air { z::ENEMY + ctx.rng.f32() } else { z::GROUND_UNIT + ctx.rng.f32() * 0.5 };
+    let z = if spec.air { z::ENEMY + ctx.rng.range(-6.0, 6.0) } else { ground_z };
     let mut gun = spec.gun;
     if let Some(g) = gun.as_mut() {
         g.timer = g.interval * ctx.rng.range(0.35, 1.0);
@@ -568,8 +654,8 @@ pub fn spawn_enemy(
     }
 
     let mut ec = commands.spawn((
-        Mesh2d(spec.mesh.clone()),
-        MeshMaterial2d(art.mat_base.clone()),
+        Mesh3d(spec.model.paint.clone()),
+        MeshMaterial3d(art.mat_paint.clone()),
         Transform::from_translation(pos.extend(z)).with_rotation(Quat::from_rotation_z(initial_rot)),
         Enemy {
             kind,
@@ -586,7 +672,7 @@ pub fn spawn_enemy(
         Health::new(spec.hp * d.hp),
         Hitbox(spec.hitbox),
         HitFlash::default(),
-        Mover::new(mv, face),
+        Mover::new(mv, face, initial_rot),
         Offscreen::new(if spec.air { 260.0 } else { 120.0 }),
         DespawnOnExit(AppState::Playing),
     ));
@@ -596,37 +682,33 @@ pub fn spawn_enemy(
     if !spec.air {
         ec.insert(Scrolls);
     }
-    let shadow_mesh = spec.mesh.clone();
+    let entity = ec.id();
+    let mut barrel = None;
     ec.with_children(|c| {
-        if spec.air {
-            c.spawn((
-                Mesh2d(shadow_mesh),
-                MeshMaterial2d(art.mat_shadow.clone()),
-                Transform::from_scale(Vec3::splat(spec.shadow)),
-                Shadow {
-                    offset: Vec2::new(26.0, -40.0) * (1.6 - spec.shadow),
-                },
-            ));
-        }
-        if let Some((mesh, dz)) = &spec.barrel {
-            c.spawn((
-                Barrel,
-                Mesh2d(mesh.clone()),
-                MeshMaterial2d(art.mat_base.clone()),
-                Transform::from_xyz(0.0, 0.0, *dz),
-            ));
+        if let Some((set, offset)) = &spec.barrel {
+            barrel = Some(
+                c.spawn((
+                    Barrel,
+                    Mesh3d(set.paint.clone()),
+                    MeshMaterial3d(art.mat_paint.clone()),
+                    Transform::from_translation(*offset),
+                ))
+                .id(),
+            );
         }
         for (offset, size) in &spec.engines {
             c.spawn((
-                Sprite {
-                    image: art.tex_glow.clone(),
-                    custom_size: Some(*size),
-                    color: Color::linear_rgb(3.2, 1.4, 0.45),
-                    ..default()
-                },
-                Transform::from_translation(offset.extend(-0.05)),
+                Mesh3d(art.quad.clone()),
+                MeshMaterial3d(art.mat_engine.clone()),
+                Transform::from_translation(offset.extend(0.0)).with_scale(size.extend(1.0)),
+                NotShadowCaster,
+                NotShadowReceiver,
             ));
         }
     });
-    ec.id()
+    attach_model_parts(commands, entity, &spec.model, art);
+    if let (Some(b), Some((set, _))) = (barrel, &spec.barrel) {
+        attach_model_parts(commands, b, set, art);
+    }
+    entity
 }

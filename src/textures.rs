@@ -1,13 +1,16 @@
-//! Procedurally generated textures for glows, bullets, clouds and UI icons.
+//! Procedurally generated textures: glows, bullets, clouds, water and sand
+//! normal maps, and UI icons.
 
+use crate::noise::{fbm, fbm_tiled};
 use crate::rng::Rng;
 use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 /// Builds an RGBA image by evaluating `f(u, v)` with `u, v` in `[-1, 1]`
-/// (`v` pointing up). `f` returns straight (non-premultiplied) sRGB + alpha.
-fn make(w: u32, h: u32, f: impl Fn(f32, f32) -> [f32; 4]) -> Image {
+/// (`v` pointing up). Colour data is sRGB unless `linear` is set (normal maps).
+fn make(w: u32, h: u32, linear: bool, f: impl Fn(f32, f32) -> [f32; 4]) -> Image {
     let mut data = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
@@ -25,9 +28,18 @@ fn make(w: u32, h: u32, f: impl Fn(f32, f32) -> [f32; 4]) -> Image {
         },
         TextureDimension::D2,
         data,
-        TextureFormat::Rgba8UnormSrgb,
+        if linear { TextureFormat::Rgba8Unorm } else { TextureFormat::Rgba8UnormSrgb },
         RenderAssetUsages::RENDER_WORLD,
     )
+}
+
+fn repeating(mut image: Image) -> Image {
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
 }
 
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
@@ -37,27 +49,36 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 
 /// Soft radial glow, used for particles, flashes and engine flames.
 pub fn soft_glow() -> Image {
-    make(64, 64, |u, v| {
+    make(64, 64, false, |u, v| {
         let d = (u * u + v * v).sqrt();
-        let a = (1.0 - d).max(0.0).powf(1.8);
-        [1.0, 1.0, 1.0, a]
+        [1.0, 1.0, 1.0, (1.0 - d).max(0.0).powf(1.8)]
+    })
+}
+
+/// Billowing smoke puff.
+pub fn smoke() -> Image {
+    make(64, 64, false, |u, v| {
+        let d = (u * u + v * v).sqrt();
+        let n = fbm(Vec2::new(u, v) * 3.0, 9, 4);
+        let a = ((1.0 - d) * (0.6 + 0.8 * n)).clamp(0.0, 1.0).powf(1.4);
+        let s = 0.75 + 0.25 * n;
+        [s, s, s, a]
     })
 }
 
 /// Enemy bullet: bright core with a darker rim so it reads on any background.
 pub fn orb() -> Image {
-    make(64, 64, |u, v| {
+    make(64, 64, false, |u, v| {
         let d = (u * u + v * v).sqrt();
         let core = 1.0 - smoothstep(0.35, 0.62, d);
         let shade = 0.22 + 0.78 * core;
-        let alpha = 1.0 - smoothstep(0.82, 0.98, d);
-        [shade, shade, shade, alpha]
+        [shade, shade, shade, 1.0 - smoothstep(0.82, 0.98, d)]
     })
 }
 
 /// Crisp anti-aliased disc.
 pub fn disc() -> Image {
-    make(64, 64, |u, v| {
+    make(64, 64, false, |u, v| {
         let d = (u * u + v * v).sqrt();
         [1.0, 1.0, 1.0, 1.0 - smoothstep(0.9, 1.0, d)]
     })
@@ -65,7 +86,7 @@ pub fn disc() -> Image {
 
 /// Soft ring for shockwaves and pickup halos.
 pub fn ring() -> Image {
-    make(128, 128, |u, v| {
+    make(128, 128, false, |u, v| {
         let d = (u * u + v * v).sqrt();
         let a = (1.0 - ((d - 0.85) / 0.13).abs()).max(0.0).powf(1.5);
         [1.0, 1.0, 1.0, a]
@@ -74,44 +95,107 @@ pub fn ring() -> Image {
 
 /// Long thin glow for tracers and sparks.
 pub fn streak() -> Image {
-    make(32, 96, |u, v| {
+    make(32, 96, false, |u, v| {
         let across = (1.0 - u.abs()).max(0.0).powf(1.6);
         let along = (1.0 - v.abs()).max(0.0).powf(0.6);
         let core = (1.0 - u.abs() * 2.5).max(0.0);
-        let a = (across * along).max(core * along);
-        [1.0, 1.0, 1.0, a]
+        [1.0, 1.0, 1.0, (across * along).max(core * along)]
     })
 }
 
-/// A fluffy cloud made of overlapping soft puffs.
+/// A cumulus cloud seen from above: puffy outline, fractal detail and
+/// lighting baked in (sunlit edges towards the top-left, shaded underside).
 pub fn cloud(seed: u64) -> Image {
     let mut rng = Rng::new(seed);
-    let puffs: Vec<(Vec2, f32)> = (0..9)
-        .map(|_| {
-            let c = Vec2::new(rng.range(-0.45, 0.45), rng.range(-0.25, 0.25));
-            (c, rng.range(0.28, 0.5))
-        })
+    let puffs: Vec<(Vec2, f32)> = (0..11)
+        .map(|_| (Vec2::new(rng.range(-0.5, 0.5), rng.range(-0.28, 0.28)), rng.range(0.22, 0.46)))
         .collect();
-    make(192, 128, move |u, v| {
-        let p = Vec2::new(u, v * 0.66);
-        let mut density = 0.0f32;
-        let mut shade = 0.0f32;
+    let s = seed as u32;
+    let density = move |p: Vec2| -> f32 {
+        let mut shape = 0.0f32;
         for (c, r) in &puffs {
-            let d = (p - *c).length() / r;
-            let k = (1.0 - d).max(0.0);
-            density += k * k;
-            // Light comes from the top-left: brighter on that side of each puff.
-            shade += k * k * (0.85 + 0.15 * ((p - *c).dot(Vec2::new(-0.6, 0.8)) / r).clamp(-1.0, 1.0));
+            let k = (1.0 - (p - *c).length() / r).max(0.0);
+            shape += k * k;
         }
-        let a = smoothstep(0.05, 0.7, density);
-        let s = if density > 0.0 { (shade / density).clamp(0.86, 1.0) } else { 1.0 };
-        [s, s, s, a]
+        let detail = fbm(p * 4.5 + Vec2::splat(s as f32 * 1.7), s, 5);
+        (shape * (0.5 + 0.9 * detail) - 0.12).max(0.0)
+    };
+    let light = Vec2::new(-0.55, 0.75).normalize() * 0.05;
+    make(256, 176, false, move |u, v| {
+        let p = Vec2::new(u, v * 0.69);
+        let d = density(p);
+        let a = smoothstep(0.02, 0.38, d);
+        if a <= 0.0 {
+            return [1.0, 1.0, 1.0, 0.0];
+        }
+        // Sample towards the sun: denser there means this point is shaded.
+        let towards = density(p + light);
+        let lit = (1.0 - (towards - d) * 3.2).clamp(0.0, 1.0);
+        let shadow = [0.66, 0.71, 0.82];
+        let c = [
+            shadow[0] + (1.0 - shadow[0]) * lit,
+            shadow[1] + (1.0 - shadow[1]) * lit,
+            shadow[2] + (1.0 - shadow[2]) * lit,
+        ];
+        [c[0], c[1], c[2], a]
     })
+}
+
+/// Encodes a tangent-space normal from height derivatives.
+fn encode_normal(dx: f32, dy: f32, strength: f32) -> [f32; 4] {
+    let n = Vec3::new(-dx * strength, -dy * strength, 1.0).normalize();
+    [n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5, 1.0]
+}
+
+/// Tileable wave normal map for the sea surface.
+pub fn water_normal() -> Image {
+    let size = 256.0;
+    let height = |u: f32, v: f32| -> f32 {
+        let p = Vec2::new(u, v);
+        fbm_tiled(p * 8.0, 31, 4, 8) + 0.35 * fbm_tiled(p * 24.0, 77, 2, 24)
+    };
+    let e = 1.0 / size;
+    repeating(make(256, 256, true, move |u, v| {
+        let (u, v) = (u * 0.5 + 0.5, v * 0.5 + 0.5);
+        let dx = (height(u + e, v) - height(u - e, v)) / (2.0 * e);
+        let dy = (height(u, v + e) - height(u, v - e)) / (2.0 * e);
+        encode_normal(dx, dy, 0.0065)
+    }))
+}
+
+/// Tileable whitecaps: sparse, wind-streaked foam on the open sea.
+pub fn whitecaps() -> Image {
+    repeating(make(512, 512, false, |u, v| {
+        let (u, v) = (u * 0.5 + 0.5, v * 0.5 + 0.5);
+        // Small, sparse flecks stretched across the wind, with soft edges.
+        let n = fbm_tiled(Vec2::new(u * 12.0, v * 24.0), 61, 4, 12);
+        let fine = fbm_tiled(Vec2::new(u * 40.0, v * 40.0), 67, 2, 40);
+        let a = smoothstep(0.7, 0.8, n) * (0.4 + 0.6 * smoothstep(0.3, 0.7, fine));
+        [1.0, 1.0, 1.0, a]
+    }))
+}
+
+/// Tileable wind-ripple normal map for sand.
+pub fn sand_normal() -> Image {
+    let size = 256.0;
+    let height = |u: f32, v: f32| -> f32 {
+        let p = Vec2::new(u, v);
+        let warp = fbm_tiled(p * 4.0, 5, 3, 4) * 2.2;
+        let ripple = ((v * 18.0 + warp) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+        ripple * 0.6 + fbm_tiled(p * 16.0, 8, 3, 16) * 0.4
+    };
+    let e = 1.0 / size;
+    repeating(make(256, 256, true, move |u, v| {
+        let (u, v) = (u * 0.5 + 0.5, v * 0.5 + 0.5);
+        let dx = (height(u + e, v) - height(u - e, v)) / (2.0 * e);
+        let dy = (height(u, v + e) - height(u, v - e)) / (2.0 * e);
+        encode_normal(dx, dy, 0.006)
+    }))
 }
 
 /// Gold five-pointed star for the HUD.
 pub fn star_icon() -> Image {
-    make(64, 64, |u, v| {
+    make(64, 64, false, |u, v| {
         let d = star_sdf(Vec2::new(u, v) * 1.1);
         let fill = 1.0 - smoothstep(-0.02, 0.02, d);
         let edge = 1.0 - smoothstep(0.03, 0.08, d);
@@ -124,7 +208,7 @@ pub fn star_icon() -> Image {
 
 /// Medal badge: a disc with a star cut into it. Tinted gold or grey in the UI.
 pub fn medal_icon() -> Image {
-    make(96, 96, |u, v| {
+    make(96, 96, false, |u, v| {
         let d = (u * u + v * v).sqrt();
         let disc = 1.0 - smoothstep(0.88, 0.96, d);
         let rim = smoothstep(0.72, 0.78, d);
@@ -136,7 +220,6 @@ pub fn medal_icon() -> Image {
 
 /// Approximate signed distance to a five-pointed star of radius ~0.9.
 fn star_sdf(p: Vec2) -> f32 {
-    // Polygon distance via edges of the 10-point outline.
     let n = 10;
     let pts: Vec<Vec2> = (0..n)
         .map(|i| {

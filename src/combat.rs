@@ -4,11 +4,13 @@ use crate::art::Art;
 use crate::audio::{PlaySfx, Sfx};
 use crate::common::*;
 use crate::effects;
+use crate::voice::{Line, Say};
 use crate::enemy::{Enemy, EnemyKind};
 use crate::pickups;
 use crate::player::{Missile, Player, PLAYER_HITBOX};
 use crate::rng::Rng;
 use crate::state::{AppState, Outcome, Run};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -59,19 +61,17 @@ impl Plugin for CombatPlugin {
 }
 
 pub fn spawn_enemy_shot(commands: &mut Commands, art: &Art, pos: Vec2, vel: Vec2, big: bool) {
-    let (size, color) = if big {
-        (28.0, Color::linear_rgb(3.6, 1.3, 0.25))
+    let (size, material) = if big {
+        (28.0, art.mat_orb_big.clone())
     } else {
-        (19.0, Color::linear_rgb(3.4, 0.5, 1.5))
+        (19.0, art.mat_orb.clone())
     };
     commands.spawn((
-        Sprite {
-            image: art.tex_orb.clone(),
-            custom_size: Some(Vec2::splat(size)),
-            color,
-            ..default()
-        },
-        Transform::from_translation(pos.extend(z::ENEMY_SHOT)),
+        Mesh3d(art.quad.clone()),
+        MeshMaterial3d(material),
+        NotShadowCaster,
+        NotShadowReceiver,
+        Transform::from_translation(pos.extend(z::ENEMY_SHOT)).with_scale(Vec3::new(size, size, 1.0)),
         Velocity(vel),
         EnemyShot {
             damage: 1.0,
@@ -124,7 +124,7 @@ fn player_shots_hit(
                 continue;
             }
             commands.entity(shot_e).try_despawn();
-            let hit_pos = sp + Vec2::Y * 6.0;
+            let hit_pos = (sp + Vec2::Y * 6.0).extend(et.translation.z + 8.0);
             if hurt_enemy(&mut health, &mut flash, shielded, shot.damage) {
                 effects::hit_sparks(&mut commands, &art, &mut rng, hit_pos, LinearRgba::rgb(3.5, 2.6, 1.0));
                 sfx.write(PlaySfx::new(Sfx::Hit).pitch(rng.range(0.9, 1.2)));
@@ -156,7 +156,7 @@ fn missiles_hit(
             }
             commands.entity(me).try_despawn();
             hurt_enemy(&mut health, &mut flash, shielded, missile.damage);
-            effects::explosion(&mut commands, &art, &mut rng, mp, 10.0, false);
+            effects::explosion(&mut commands, &art, &mut rng, mp.extend(et.translation.z), 10.0, false);
             sfx.write(PlaySfx::new(Sfx::Hit).pitch(0.7));
             break;
         }
@@ -165,13 +165,14 @@ fn missiles_hit(
 
 /// Damages the player unless they're protected. Returns true if the hit landed
 /// (including when the shield absorbed it).
+#[allow(clippy::too_many_arguments)]
 pub fn hurt_player(
-    art: &Art,
     player: &mut Player,
     amount: f32,
     run: &mut Run,
     shake: &mut Shake,
     sfx: &mut MessageWriter<PlaySfx>,
+    voice: &mut MessageWriter<Say>,
     commands: &mut Commands,
     god: bool,
 ) -> bool {
@@ -182,14 +183,18 @@ pub fn hurt_player(
         sfx.write(PlaySfx::new(Sfx::Shield).volume(0.6));
         return true;
     }
+    let was_ok = player.hp > player.max_hp * 0.34;
     if !god {
         player.hp -= amount;
+    }
+    if was_ok && player.hp > 0.0 && player.hp <= player.max_hp * 0.34 {
+        voice.write(Say(Line::HullCritical));
     }
     player.invuln = 1.4;
     run.damaged = true;
     shake.add(0.5);
     sfx.write(PlaySfx::new(Sfx::Hurt));
-    effects::screen_flash(commands, art, Color::srgb(1.0, 0.15, 0.1), 0.28, 0.3);
+    effects::screen_flash(commands, Color::srgb(1.0, 0.15, 0.1), 0.28, 0.3);
     true
 }
 
@@ -200,6 +205,7 @@ fn enemy_shots_hit(
     mut shake: ResMut<Shake>,
     god: Res<GodMode>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<Say>,
     shots: Query<(Entity, &Transform, &EnemyShot)>,
     mut player: Query<(&mut Player, &Transform)>,
 ) {
@@ -217,18 +223,18 @@ fn enemy_shots_hit(
             continue;
         }
         commands.entity(e).try_despawn();
-        effects::puff(&mut commands, &art, sp, Vec2::ZERO, 0.15, (30.0, 8.0), LinearRgba::rgb(3.0, 1.0, 2.0));
-        hurt_player(&art, &mut player, shot.damage, &mut run, &mut shake, &mut sfx, &mut commands, god.0);
+        effects::puff(&mut commands, &art, sp.extend(z::ENEMY_SHOT), Vec2::ZERO, 0.15, (30.0, 8.0), LinearRgba::rgb(3.0, 1.0, 2.0));
+        hurt_player(&mut player, shot.damage, &mut run, &mut shake, &mut sfx, &mut voice, &mut commands, god.0);
     }
 }
 
 fn enemy_contact(
     mut commands: Commands,
-    art: Res<Art>,
     mut run: ResMut<Run>,
     mut shake: ResMut<Shake>,
     god: Res<GodMode>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<Say>,
     mut player: Query<(&mut Player, &Transform), Without<Enemy>>,
     mut enemies: Query<(&Enemy, &Transform, &Hitbox, &mut Health, &mut HitFlash)>,
 ) {
@@ -242,7 +248,7 @@ fn enemy_contact(
         if et.translation.truncate().distance_squared(pp) > r * r {
             continue;
         }
-        if hurt_player(&art, &mut player, 2.0, &mut run, &mut shake, &mut sfx, &mut commands, god.0) {
+        if hurt_player(&mut player, 2.0, &mut run, &mut shake, &mut sfx, &mut voice, &mut commands, god.0) {
             health.hp -= 15.0;
             common_flash(&mut flash);
         }
@@ -255,6 +261,7 @@ fn detonate_bombs(
     mut rng: ResMut<Rng>,
     mut shake: ResMut<Shake>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<Say>,
     mut bombs: MessageReader<BombDetonated>,
     shots: Query<(Entity, &Transform), With<EnemyShot>>,
     mut enemies: Query<(&Transform, &mut Health, &mut HitFlash, Has<Shielded>), With<Enemy>>,
@@ -264,7 +271,7 @@ fn detonate_bombs(
             effects::puff(
                 &mut commands,
                 &art,
-                t.translation.truncate(),
+                t.translation,
                 Vec2::ZERO,
                 0.3,
                 (22.0, 40.0),
@@ -283,7 +290,7 @@ fn detonate_bombs(
             effects::shockwave(
                 &mut commands,
                 &art,
-                bomb.pos,
+                bomb.pos.extend(z::FX),
                 40.0,
                 1400.0 + i as f32 * 300.0,
                 0.6 + i as f32 * 0.15,
@@ -292,11 +299,12 @@ fn detonate_bombs(
         }
         for _ in 0..12 {
             let p = bomb.pos + rng.in_disc(260.0);
-            effects::explosion(&mut commands, &art, &mut rng, p, 22.0, false);
+            effects::explosion(&mut commands, &art, &mut rng, p.extend(z::ENEMY), 22.0, false);
         }
-        effects::screen_flash(&mut commands, &art, Color::WHITE, 0.75, 0.6);
+        effects::screen_flash(&mut commands, Color::WHITE, 0.75, 0.6);
         shake.add(0.8);
         sfx.write(PlaySfx::new(Sfx::Bomb));
+        voice.write(Say(Line::BombAway));
     }
 }
 
@@ -314,20 +322,20 @@ fn destroy_enemies(
             continue;
         }
         let pos = t.translation.truncate();
-        effects::explosion(&mut commands, &art, &mut rng, pos, enemy.size, !enemy.air);
+        effects::explosion(&mut commands, &art, &mut rng, t.translation, enemy.size, !enemy.air);
         run.score += enemy.score;
         if enemy.counted {
             run.kills += 1;
         }
         if enemy.score >= 300 {
-            effects::floating_text(&mut commands, pos, enemy.score.to_string(), Color::srgb(1.0, 0.95, 0.7), 22.0);
+            effects::floating_text(&mut commands, t.translation, enemy.score.to_string(), Color::srgb(1.0, 0.95, 0.7), 22.0);
         }
         pickups::drop_stars(&mut commands, &art, &mut rng, pos, enemy.stars);
         if let Some(kind) = enemy.drop {
             pickups::drop_power(&mut commands, &art, pos, kind);
         }
         if enemy.survivor {
-            pickups::spawn_survivor(&mut commands, &art, pos);
+            pickups::spawn_survivor(&mut commands, &art, t.translation);
         }
         let big = enemy.size >= 40.0;
         sfx.write(PlaySfx::new(if big { Sfx::ExplodeBig } else { Sfx::ExplodeSmall }).pitch(rng.range(0.85, 1.15)));
@@ -343,21 +351,22 @@ fn destroy_player(
     mut run: ResMut<Run>,
     mut shake: ResMut<Shake>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<Say>,
     q: Query<(Entity, &Player, &Transform)>,
 ) {
     let Ok((e, player, t)) = q.single() else { return };
     if player.hp > 0.0 {
         return;
     }
-    let pos = t.translation.truncate();
-    effects::explosion(&mut commands, &art, &mut rng, pos, 60.0, false);
+    effects::explosion(&mut commands, &art, &mut rng, t.translation, 60.0, false);
     for _ in 0..4 {
-        let p = pos + rng.in_disc(40.0);
+        let p = t.translation + rng.in_disc(40.0).extend(0.0);
         effects::explosion(&mut commands, &art, &mut rng, p, 25.0, false);
     }
-    effects::screen_flash(&mut commands, &art, Color::srgb(1.0, 0.6, 0.3), 0.5, 0.5);
+    effects::screen_flash(&mut commands, Color::srgb(1.0, 0.6, 0.3), 0.5, 0.5);
     shake.add(1.0);
     sfx.write(PlaySfx::new(Sfx::ExplodeBig));
+    voice.write(Say(Line::MissionFailed));
     run.end(Outcome::Defeat, 2.8);
     commands.entity(e).try_despawn();
 }

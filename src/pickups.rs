@@ -7,6 +7,7 @@ use crate::effects;
 use crate::player::{Player, MAX_POWER};
 use crate::rng::Rng;
 use crate::state::{AppState, Run};
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -18,6 +19,15 @@ pub enum PowerKind {
 }
 
 impl PowerKind {
+    fn index(self) -> usize {
+        match self {
+            PowerKind::Weapon => 0,
+            PowerKind::Shield => 1,
+            PowerKind::Repair => 2,
+            PowerKind::Bomb => 3,
+        }
+    }
+
     fn color(self) -> LinearRgba {
         match self {
             PowerKind::Weapon => LinearRgba::rgb(3.2, 1.6, 0.3),
@@ -39,6 +49,20 @@ pub struct Pickup {
     pub kind: PickupKind,
     vel: Vec2,
     age: f32,
+    seed: f32,
+    sparkle: f32,
+}
+
+/// The spinning star model inside a star pickup.
+#[derive(Component)]
+struct StarSpin {
+    seed: f32,
+}
+
+/// Soft pulsing glow behind stars and power-ups.
+#[derive(Component)]
+struct Halo {
+    base: f32,
     seed: f32,
 }
 
@@ -62,8 +86,19 @@ pub struct PickupPlugin;
 impl Plugin for PickupPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, (move_pickups, collect_pickups).chain().in_set(GameSet::Resolve))
-            .add_systems(Update, rescue_survivors.in_set(GameSet::Resolve));
+            .add_systems(Update, rescue_survivors.in_set(GameSet::Resolve))
+            .add_systems(Update, (spin_stars, pulse_halos));
     }
+}
+
+fn fx_quad(art: &Art, material: &Handle<StandardMaterial>, z: f32, size: f32) -> impl Bundle {
+    (
+        Mesh3d(art.quad.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::from_xyz(0.0, 0.0, z).with_scale(Vec3::new(size, size, 1.0)),
+        NotShadowCaster,
+        NotShadowReceiver,
+    )
 }
 
 pub fn drop_stars(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec2, count: u32) {
@@ -71,110 +106,99 @@ pub fn drop_stars(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec2, 
     let small = count % 5;
     for i in 0..(big + small) {
         let value = if i < big { 5 } else { 1 };
-        let mesh = if value > 1 { art.big_star.clone() } else { art.star.clone() };
+        let (mesh, halo) = if value > 1 { (art.big_star.clone(), 70.0) } else { (art.star.clone(), 46.0) };
         let vel = rng.dir() * rng.range(60.0, 200.0) + Vec2::Y * 60.0;
+        let seed = rng.range(0.0, 10.0);
         commands.spawn((
-            Mesh2d(mesh),
-            MeshMaterial2d(art.mat_base.clone()),
-            Transform::from_translation((pos + rng.in_disc(10.0)).extend(z::PICKUP + rng.f32() * 0.5)),
+            Transform::from_translation((pos + rng.in_disc(10.0)).extend(z::PICKUP + rng.f32() * 3.0)),
+            Visibility::default(),
             Pickup {
                 kind: PickupKind::Star(value),
                 vel,
                 age: 0.0,
-                seed: rng.range(0.0, 10.0),
+                seed,
+                sparkle: rng.range(0.0, 0.6),
             },
             Offscreen::new(40.0),
             DespawnOnExit(AppState::Playing),
+            children![
+                (fx_quad(art, &art.mat_star_halo, -4.0, halo), Halo { base: halo, seed }),
+                (
+                    StarSpin { seed },
+                    Mesh3d(mesh),
+                    MeshMaterial3d(art.mat_star.clone()),
+                    Transform::default(),
+                ),
+            ],
         ));
     }
 }
 
 pub fn drop_power(commands: &mut Commands, art: &Art, pos: Vec2, kind: PowerKind) {
-    let icon = match kind {
-        PowerKind::Weapon => art.icons[0].clone(),
-        PowerKind::Shield => art.icons[1].clone(),
-        PowerKind::Repair => art.icons[2].clone(),
-        PowerKind::Bomb => art.icons[3].clone(),
-    };
+    let k = kind.index();
     commands.spawn((
-        Sprite {
-            image: art.tex_glow.clone(),
-            custom_size: Some(Vec2::splat(70.0)),
-            color: Color::LinearRgba(kind.color()),
-            ..default()
-        },
-        Transform::from_translation(pos.extend(z::PICKUP + 0.6)),
+        Transform::from_translation(pos.extend(z::PICKUP + 4.0)),
+        Visibility::default(),
         Pickup {
             kind: PickupKind::Power(kind),
             vel: Vec2::Y * 120.0,
             age: 0.0,
             seed: 0.0,
+            sparkle: 1.0,
         },
         Offscreen::new(60.0),
         DespawnOnExit(AppState::Playing),
         children![
+            (fx_quad(art, &art.mat_power_glow[k], -2.0, 76.0), Halo { base: 76.0, seed: 0.0 }),
+            fx_quad(art, &art.mat_power_disc[k], 0.0, 40.0),
+            fx_quad(art, &art.mat_power_ring[k], 0.5, 48.0),
             (
-                Sprite {
-                    image: art.tex_disc.clone(),
-                    custom_size: Some(Vec2::splat(38.0)),
-                    color: Color::LinearRgba(kind.color() * 0.35).with_alpha(1.0),
-                    ..default()
-                },
-                Transform::from_xyz(0.0, 0.0, 0.05),
-            ),
-            (
-                Sprite {
-                    image: art.tex_ring.clone(),
-                    custom_size: Some(Vec2::splat(46.0)),
-                    color: Color::LinearRgba(kind.color()),
-                    ..default()
-                },
-                Transform::from_xyz(0.0, 0.0, 0.1),
-            ),
-            (
-                Mesh2d(icon),
-                MeshMaterial2d(art.mat_base.clone()),
-                Transform::from_xyz(0.0, 0.0, 0.2),
+                Mesh3d(art.icons[k].clone()),
+                MeshMaterial3d(art.mat_icon.clone()),
+                Transform::from_xyz(0.0, 0.0, 1.0),
+                NotShadowCaster,
             ),
         ],
     ));
 }
 
-pub fn spawn_survivor(commands: &mut Commands, art: &Art, pos: Vec2) {
-    commands.spawn((
-        Mesh2d(art.survivor.clone()),
-        MeshMaterial2d(art.mat_base.clone()),
-        Transform::from_translation(pos.extend(z::SURVIVOR)),
-        Survivor { progress: 0.0 },
-        Scrolls,
-        Offscreen::new(30.0),
-        DespawnOnExit(AppState::Playing),
-        children![
-            (
-                Beacon,
-                Sprite {
-                    image: art.tex_ring.clone(),
-                    custom_size: Some(Vec2::splat(60.0)),
-                    color: Color::linear_rgba(2.5, 2.2, 0.6, 0.8),
-                    ..default()
-                },
-                Transform::from_xyz(0.0, 0.0, -0.1),
-            ),
-            (
-                Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.6), Vec2::new(BAR_W + 4.0, 8.0)),
-                Transform::from_xyz(0.0, 26.0, 0.2),
-            ),
-            (
-                RescueBarFill,
-                Sprite::from_color(Color::linear_rgb(0.6, 2.8, 0.8), Vec2::new(BAR_W, 4.0)),
-                Transform::from_xyz(-BAR_W / 2.0, 26.0, 0.3).with_scale(Vec3::new(0.001, 1.0, 1.0)),
-            ),
-        ],
-    ));
+pub fn spawn_survivor(commands: &mut Commands, art: &Art, pos: Vec3) {
+    let survivor = commands
+        .spawn((
+            Mesh3d(art.survivor.paint.clone()),
+            MeshMaterial3d(art.mat_paint.clone()),
+            Transform::from_translation(pos),
+            Survivor { progress: 0.0 },
+            Scrolls,
+            Offscreen::new(30.0),
+            DespawnOnExit(AppState::Playing),
+            children![
+                (Beacon, fx_quad(art, &art.mat_beacon, 3.0, 60.0)),
+                (
+                    Mesh3d(art.quad.clone()),
+                    MeshMaterial3d(art.mat_bar_bg.clone()),
+                    Transform::from_xyz(0.0, 28.0, 30.0).with_scale(Vec3::new(BAR_W + 4.0, 8.0, 1.0)),
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                ),
+                (
+                    RescueBarFill,
+                    Mesh3d(art.quad.clone()),
+                    MeshMaterial3d(art.mat_bar_fill.clone()),
+                    Transform::from_xyz(-BAR_W / 2.0, 28.0, 31.0).with_scale(Vec3::new(0.001, 4.0, 1.0)),
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                ),
+            ],
+        ))
+        .id();
+    let _ = survivor;
 }
 
 fn move_pickups(
+    mut commands: Commands,
     time: Res<Time>,
+    art: Res<Art>,
     scroll: Res<ScrollSpeed>,
     player: Query<(&Player, &Transform), Without<Pickup>>,
     mut q: Query<(&mut Pickup, &mut Transform)>,
@@ -202,14 +226,42 @@ fn move_pickups(
         t.translation += (p.vel * dt).extend(0.0);
 
         if is_star {
-            // Spin like a coin.
-            t.rotate_z(1.5 * dt);
-            t.scale.x = ((p.age + p.seed) * 5.0).cos().abs().max(0.25);
+            // Occasional twinkle.
+            p.sparkle -= dt;
+            if p.sparkle <= 0.0 {
+                p.sparkle = 0.5 + (p.seed * 7.3).fract() * 0.6;
+                let offset = Vec2::from_angle(p.age * 3.0 + p.seed) * 9.0;
+                effects::puff(
+                    &mut commands,
+                    &art,
+                    (t.translation.truncate() + offset).extend(t.translation.z + 6.0),
+                    Vec2::ZERO,
+                    0.25,
+                    (4.0, 16.0),
+                    LinearRgba::rgb(3.0, 2.6, 1.4),
+                );
+            }
         } else {
             t.translation.x += (p.age * 2.0).sin() * 30.0 * dt;
             let pulse = 1.0 + 0.08 * (p.age * 6.0).sin();
             t.scale = Vec3::splat(pulse);
         }
+    }
+}
+
+/// Stars spin and flip like coins, catching the sunlight.
+fn spin_stars(time: Res<Time>, mut q: Query<(&StarSpin, &mut Transform)>) {
+    let s = time.elapsed_secs();
+    for (spin, mut t) in &mut q {
+        t.rotation = Quat::from_rotation_y((s + spin.seed) * 4.0) * Quat::from_rotation_z((s + spin.seed) * 1.2);
+    }
+}
+
+fn pulse_halos(time: Res<Time>, mut q: Query<(&Halo, &mut Transform)>) {
+    let s = time.elapsed_secs();
+    for (halo, mut t) in &mut q {
+        let k = halo.base * (1.0 + 0.16 * ((s + halo.seed) * 5.0).sin());
+        t.scale = Vec3::new(k, k, 1.0);
     }
 }
 
@@ -219,6 +271,7 @@ fn collect_pickups(
     mut run: ResMut<Run>,
     mut rng: ResMut<Rng>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<crate::voice::Say>,
     mut player: Query<(&mut Player, &Transform), Without<Pickup>>,
     q: Query<(Entity, &Pickup, &Transform)>,
 ) {
@@ -233,40 +286,47 @@ fn collect_pickups(
             continue;
         }
         commands.entity(e).try_despawn();
+        let fx_pos = pos.extend(z::FX);
         match pickup.kind {
             PickupKind::Star(v) => {
                 run.stars += v;
                 run.score += 10 * v;
                 sfx.write(PlaySfx::new(Sfx::Star).pitch(rng.range(0.95, 1.12)));
-                effects::puff(&mut commands, &art, pos, Vec2::ZERO, 0.2, (30.0, 6.0), LinearRgba::rgb(3.0, 2.2, 0.5));
+                effects::puff(&mut commands, &art, fx_pos, Vec2::ZERO, 0.2, (30.0, 6.0), LinearRgba::rgb(3.0, 2.2, 0.5));
             }
             PickupKind::Power(kind) => {
-                let label = match kind {
+                use crate::voice::Line;
+                let (label, line) = match kind {
                     PowerKind::Weapon => {
                         if player.power < MAX_POWER {
                             player.power += 1;
-                            if player.power == MAX_POWER { "MAX POWER" } else { "POWER UP" }
+                            if player.power == MAX_POWER {
+                                ("MAX POWER", Line::MaxPower)
+                            } else {
+                                ("POWER UP", Line::PowerUp)
+                            }
                         } else {
                             run.score += 2000;
-                            "+2000"
+                            ("+2000", Line::MaxPower)
                         }
                     }
                     PowerKind::Shield => {
                         player.shield = 9.0;
-                        "SHIELD"
+                        ("SHIELD", Line::Shield)
                     }
                     PowerKind::Repair => {
                         player.hp = (player.hp + 3.0).min(player.max_hp);
-                        "REPAIR"
+                        ("REPAIR", Line::Repair)
                     }
                     PowerKind::Bomb => {
                         player.bombs = (player.bombs + 1).min(5);
-                        "+1 BOMB"
+                        ("+1 BOMB", Line::BombReady)
                     }
                 };
-                effects::floating_text(&mut commands, pos + Vec2::Y * 30.0, label, Color::LinearRgba(kind.color()), 26.0);
-                effects::shockwave(&mut commands, &art, pos, 20.0, 180.0, 0.35, kind.color());
+                effects::floating_text(&mut commands, fx_pos + Vec3::Y * 30.0, label, Color::LinearRgba(kind.color()), 26.0);
+                effects::shockwave(&mut commands, &art, fx_pos, 20.0, 180.0, 0.35, kind.color());
                 sfx.write(PlaySfx::new(if kind == PowerKind::Shield { Sfx::Shield } else { Sfx::PowerUp }));
+                voice.write(crate::voice::Say(line));
             }
         }
     }
@@ -278,16 +338,11 @@ fn rescue_survivors(
     art: Res<Art>,
     mut run: ResMut<Run>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<crate::voice::Say>,
     player: Query<(&Player, &Transform), Without<Survivor>>,
     mut survivors: Query<(Entity, &mut Survivor, &Transform, &Children)>,
-    mut fills: Query<
-        &mut Transform,
-        (With<RescueBarFill>, Without<Survivor>, Without<Beacon>, Without<Player>),
-    >,
-    mut beacons: Query<
-        (&mut Sprite, &mut Transform),
-        (With<Beacon>, Without<Survivor>, Without<RescueBarFill>, Without<Player>),
-    >,
+    mut fills: Query<&mut Transform, (With<RescueBarFill>, Without<Survivor>, Without<Beacon>, Without<Player>)>,
+    mut beacons: Query<&mut Transform, (With<Beacon>, Without<Survivor>, Without<RescueBarFill>, Without<Player>)>,
 ) {
     let dt = time.delta_secs();
     let player = player.single().ok().filter(|(p, _)| p.hp > 0.0);
@@ -304,26 +359,24 @@ fn rescue_survivors(
         let k = (s.progress / RESCUE_TIME).clamp(0.0, 1.0);
         for child in children.iter() {
             if let Ok(mut ft) = fills.get_mut(child) {
-                ft.scale.x = k.max(0.001);
+                ft.scale.x = (BAR_W * k).max(0.001);
                 ft.translation.x = -BAR_W / 2.0 + BAR_W * k / 2.0;
             }
-            if let Ok((mut sprite, mut bt)) = beacons.get_mut(child) {
+            if let Ok(mut bt) = beacons.get_mut(child) {
                 let w = (time.elapsed_secs() * 2.0).fract();
-                bt.scale = Vec3::splat(0.6 + w * 0.9);
-                // Quantised so the sprite only changes a few times per pulse.
-                let alpha = (0.9 * (1.0 - w) * 8.0).round() / 8.0;
-                if sprite.color.alpha() != alpha {
-                    sprite.color.set_alpha(alpha);
-                }
+                let size = 60.0 * (0.6 + w * 0.9);
+                bt.scale = Vec3::new(size, size, 1.0);
             }
         }
         if s.progress >= RESCUE_TIME {
             run.rescued += 1;
             run.score += 1000;
             run.stars += 10;
-            effects::floating_text(&mut commands, pos + Vec2::Y * 30.0, "RESCUED!", Color::srgb(0.6, 1.0, 0.6), 26.0);
-            effects::shockwave(&mut commands, &art, pos, 20.0, 160.0, 0.4, LinearRgba::rgb(0.6, 3.0, 0.8));
+            let fx = t.translation + Vec3::new(0.0, 30.0, 20.0);
+            effects::floating_text(&mut commands, fx, "RESCUED!", Color::srgb(0.6, 1.0, 0.6), 26.0);
+            effects::shockwave(&mut commands, &art, fx, 20.0, 160.0, 0.4, LinearRgba::rgb(0.6, 3.0, 0.8));
             sfx.write(PlaySfx::new(Sfx::Rescue));
+            voice.write(crate::voice::Say(crate::voice::Line::Rescued));
             commands.entity(e).try_despawn();
         }
     }

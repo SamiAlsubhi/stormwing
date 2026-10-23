@@ -6,7 +6,8 @@
 
 use crate::art::Art;
 use crate::audio::{PlaySfx, Sfx};
-use crate::background::{spawn_island, Backdrop, THEMES};
+use crate::terrain::{dune_height, spawn_feature_island, Backdrop, FollowGround, Footprint, TerrainKind, THEMES};
+use crate::voice::{Line, Say};
 use crate::boss::{spawn_boss, BOSSES};
 use crate::common::*;
 use crate::enemy::{spawn_enemy, Difficulty, EnemyKind, Move, SpawnCtx};
@@ -77,7 +78,8 @@ impl Plugin for LevelPlugin {
     }
 }
 
-fn start_stage(mut commands: Commands, run: Res<Run>, mut banner: ResMut<Banner>) {
+fn start_stage(mut commands: Commands, run: Res<Run>, mut banner: ResMut<Banner>, mut voice: MessageWriter<Say>) {
+    voice.write(Say(Line::MissionStart));
     let events = build_script(run.stage);
     let boss_time = events
         .iter()
@@ -117,9 +119,12 @@ fn run_director(
     mut rng: ResMut<Rng>,
     mut banner: ResMut<Banner>,
     mut sfx: MessageWriter<PlaySfx>,
+    mut voice: MessageWriter<Say>,
+    ground: Res<GroundScroll>,
+    islands: Query<(Entity, &Transform, &Footprint)>,
 ) {
     director.t += time.delta_secs();
-    let theme = &THEMES[backdrop.theme];
+    let kind = backdrop.kind();
     let mut island_rng = director.rng.0.take().unwrap_or_else(|| Rng::new(1));
     let stage = run.stage.min(BOSSES.len() - 1);
     while director.next < director.events.len() && director.events[director.next].0 <= director.t {
@@ -132,18 +137,38 @@ fn run_director(
             rng: &mut rng,
         };
         match ev {
-            Ev::One { kind, pos, mv, drop } => {
-                spawn_enemy(&mut commands, &mut ctx, kind, pos, mv, drop);
+            Ev::One { kind: enemy, pos, mv, drop } => {
+                let mut pos = pos;
+                if enemy == EnemyKind::Boat {
+                    let land: Vec<(Vec2, f32)> =
+                        islands.iter().map(|(_, t, f)| (t.translation.truncate(), f.radius * 0.8 + 30.0)).collect();
+                    if let Some(x) = crate::terrain::free_x(&land, pos.y, 30.0, Some(pos.x), &mut island_rng) {
+                        pos.x = x.clamp(-HALF_W + 40.0, HALF_W - 40.0);
+                    }
+                }
+                let on_dunes = kind == TerrainKind::Desert && enemy == EnemyKind::Tank;
+                let ground_z = if on_dunes {
+                    dune_height(pos.x, pos.y + ground.distance)
+                } else {
+                    z::WATER + 0.5
+                };
+                let e = spawn_enemy(&mut commands, &mut ctx, enemy, pos, ground_z, mv, drop);
+                if on_dunes {
+                    commands.entity(e).insert(FollowGround);
+                }
             }
             Ev::Island { x, r, layout } => {
-                let y = HALF_H + r + 40.0;
-                spawn_island(&mut commands, &mut meshes, &art, theme, &mut island_rng, Vec2::new(x, y), r);
-                let centre = Vec2::new(x, y);
+                let existing: Vec<(Entity, Vec2, Footprint)> =
+                    islands.iter().map(|(e, t, f)| (e, t.translation.truncate(), *f)).collect();
+                let (island, centre) =
+                    spawn_feature_island(&mut commands, &mut meshes, &art, kind, &mut island_rng, x, r, &existing);
                 let ground = |island_rng: &mut Rng, k: f32| {
                     centre + Vec2::from_angle(island_rng.range(0.0, std::f32::consts::TAU)) * r * k
                 };
-                let mut spawn_ground = |kind: EnemyKind, p: Vec2, ctx: &mut SpawnCtx| {
-                    spawn_enemy(&mut commands, ctx, kind, p, Move::Ground(Vec2::ZERO), None);
+                // Ground targets stand on the island's surface.
+                let mut spawn_ground = |enemy: EnemyKind, p: Vec2, ctx: &mut SpawnCtx| {
+                    let h = island.height(p - centre).max(0.0);
+                    spawn_enemy(&mut commands, ctx, enemy, p, h, Move::Ground(Vec2::ZERO), None);
                 };
                 match layout {
                     Layout::Turrets(n) => {
@@ -182,6 +207,7 @@ fn run_director(
                     warning: true,
                 };
                 sfx.write(PlaySfx::new(Sfx::Warning));
+                voice.write(Say(Line::BossWarning));
             }
             Ev::Boss => {
                 spawn_boss(&mut commands, &mut ctx, stage);

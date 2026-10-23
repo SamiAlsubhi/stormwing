@@ -1,40 +1,44 @@
 //! Particles, explosions, floating score text, screen shake and flashes.
+//!
+//! Particles are camera-facing quads drawn with self-lit materials: fire,
+//! sparks and shockwaves blend additively (and bloom), smoke and debris blend
+//! normally. Colours fade through a cache of materials quantised along each
+//! fade, so no per-frame material churn is needed.
 
-use crate::art::Art;
+use crate::art::{fx_material, Art};
 use crate::common::*;
 use crate::rng::Rng;
 use crate::state::AppState;
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use bevy::sprite_render::AlphaMode2d;
 
 /// Which texture a particle is drawn with.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FxTex {
     Glow,
+    Smoke,
     Ring,
     Streak,
     Solid,
 }
 
-/// Particles are textured quads whose colour comes from a cache of
-/// materials, quantised along each fade. Changing a `Sprite`'s colour every
-/// frame would instead create a fresh material per particle per frame.
+type FxKey = (FxTex, bool, [i16; 4]);
+
 #[derive(Resource, Default)]
 struct FxMaterials {
-    cache: HashMap<(FxTex, [i16; 4]), Handle<ColorMaterial>>,
+    cache: HashMap<FxKey, Handle<StandardMaterial>>,
 }
 
-type FxKey = (FxTex, [i16; 4]);
-
-fn fx_key(tex: FxTex, c: LinearRgba) -> FxKey {
+fn fx_key(tex: FxTex, additive: bool, c: LinearRgba) -> FxKey {
     let q = |v: f32| (v * 24.0).round() as i16;
-    (tex, [q(c.red), q(c.green), q(c.blue), q(c.alpha.clamp(0.0, 1.0))])
+    (tex, additive, [q(c.red), q(c.green), q(c.blue), q(c.alpha.clamp(0.0, 1.0))])
 }
 
 #[derive(Component)]
 pub struct Particle {
     pub tex: FxTex,
+    pub additive: bool,
     pub vel: Vec2,
     pub drag: f32,
     pub life: f32,
@@ -42,12 +46,10 @@ pub struct Particle {
     pub size: (Vec2, Vec2),
     pub color: (LinearRgba, LinearRgba),
     pub spin: f32,
-    /// Rotate the sprite to point along its velocity.
+    /// Rotate to point along the velocity.
     pub align: bool,
     /// Drift with the ground scroll (smoke, scorch marks).
     pub grounded: bool,
-    /// Ignore the game clock (screen flashes keep fading while paused).
-    pub real_time: bool,
     key: Option<FxKey>,
 }
 
@@ -55,6 +57,7 @@ impl Particle {
     fn new(vel: Vec2, life: f32, size: Vec2, color: LinearRgba) -> Self {
         Self {
             tex: FxTex::Glow,
+            additive: true,
             vel,
             drag: 2.0,
             life,
@@ -64,7 +67,6 @@ impl Particle {
             spin: 0.0,
             align: false,
             grounded: false,
-            real_time: false,
             key: None,
         }
     }
@@ -73,12 +75,25 @@ impl Particle {
         self.tex = tex;
         self
     }
+
+    fn blended(mut self) -> Self {
+        self.additive = false;
+        self
+    }
 }
 
 #[derive(Component)]
 pub struct FloatingText {
+    world: Vec3,
     life: f32,
     max_life: f32,
+}
+
+#[derive(Component)]
+pub struct ScreenFlash {
+    life: f32,
+    max_life: f32,
+    alpha: f32,
 }
 
 pub struct EffectsPlugin;
@@ -86,7 +101,7 @@ pub struct EffectsPlugin;
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FxMaterials>()
-            .add_systems(Update, (update_particles, update_floating_text, apply_shake))
+            .add_systems(Update, (update_particles, update_floating_text, update_flash, apply_shake))
             .add_systems(PostUpdate, apply_particle_materials);
     }
 }
@@ -94,12 +109,11 @@ impl Plugin for EffectsPlugin {
 fn update_particles(
     mut commands: Commands,
     time: Res<Time>,
-    real: Res<Time<Real>>,
     scroll: Res<ScrollSpeed>,
     mut q: Query<(Entity, &mut Particle, &mut Transform)>,
 ) {
+    let dt = time.delta_secs();
     for (e, mut p, mut t) in &mut q {
-        let dt = if p.real_time { real.delta_secs() } else { time.delta_secs() };
         p.life -= dt;
         if p.life <= 0.0 {
             commands.entity(e).try_despawn();
@@ -127,13 +141,13 @@ fn apply_particle_materials(
     mut commands: Commands,
     art: Res<Art>,
     mut cache: ResMut<FxMaterials>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    mut q: Query<(Entity, &mut Particle, Option<&mut MeshMaterial2d<ColorMaterial>>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(Entity, &mut Particle, Option<&mut MeshMaterial3d<StandardMaterial>>)>,
 ) {
     for (e, mut p, mat) in &mut q {
         let k = (1.0 - p.life / p.max_life).clamp(0.0, 1.0);
         let (a, b) = p.color;
-        let key = fx_key(p.tex, a.mix(&b, k));
+        let key = fx_key(p.tex, p.additive, a.mix(&b, k));
         if p.key == Some(key) && mat.is_some() {
             continue;
         }
@@ -142,30 +156,22 @@ fn apply_particle_materials(
             .cache
             .entry(key)
             .or_insert_with(|| {
-                let (tex, [r, g, bl, al]) = key;
+                let (tex, additive, [r, g, bl, al]) = key;
                 let texture = match tex {
                     FxTex::Glow => Some(art.tex_glow.clone()),
+                    FxTex::Smoke => Some(art.tex_smoke.clone()),
                     FxTex::Ring => Some(art.tex_ring.clone()),
                     FxTex::Streak => Some(art.tex_streak.clone()),
                     FxTex::Solid => None,
                 };
-                materials.add(ColorMaterial {
-                    color: Color::LinearRgba(LinearRgba::new(
-                        r as f32 / 24.0,
-                        g as f32 / 24.0,
-                        bl as f32 / 24.0,
-                        al as f32 / 24.0,
-                    )),
-                    texture,
-                    alpha_mode: AlphaMode2d::Blend,
-                    ..default()
-                })
+                let color = LinearRgba::new(r as f32 / 24.0, g as f32 / 24.0, bl as f32 / 24.0, al as f32 / 24.0);
+                materials.add(fx_material(texture, Color::LinearRgba(color), additive))
             })
             .clone();
         match mat {
             Some(mut m) => m.0 = handle,
             None => {
-                commands.entity(e).insert(MeshMaterial2d(handle));
+                commands.entity(e).insert(MeshMaterial3d(handle));
             }
         }
     }
@@ -174,20 +180,42 @@ fn apply_particle_materials(
 fn update_floating_text(
     mut commands: Commands,
     time: Res<Time>,
-    mut q: Query<(Entity, &mut FloatingText, &mut Transform, &mut TextColor)>,
+    ui_scale: Res<UiScale>,
+    camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    mut q: Query<(Entity, &mut FloatingText, &mut Node, &mut TextColor, &mut UiTransform)>,
 ) {
     let dt = time.delta_secs();
-    for (e, mut f, mut t, mut color) in &mut q {
+    let Ok((cam, cam_t)) = camera.single() else { return };
+    for (e, mut f, mut node, mut color, mut ui_t) in &mut q {
         f.life -= dt;
         if f.life <= 0.0 {
             commands.entity(e).try_despawn();
             continue;
         }
-        t.translation.y += 40.0 * dt;
+        f.world.y += 40.0 * dt;
+        if let Ok(vp) = cam.world_to_viewport(cam_t, f.world) {
+            node.left = px(vp.x / ui_scale.0 - 150.0);
+            node.top = px(vp.y / ui_scale.0 - 16.0);
+        }
         let k = f.life / f.max_life;
         color.0.set_alpha((k * 2.0).min(1.0));
         let pop = 1.0 + 0.4 * ((1.0 - k) * 12.0).min(1.0) * (1.0 - (1.0 - k) * 2.0).max(0.0);
-        t.scale = Vec3::splat(pop);
+        ui_t.scale = Vec2::splat(pop);
+    }
+}
+
+fn update_flash(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    mut q: Query<(Entity, &mut ScreenFlash, &mut BackgroundColor)>,
+) {
+    for (e, mut f, mut bg) in &mut q {
+        f.life -= time.delta_secs();
+        if f.life <= 0.0 {
+            commands.entity(e).try_despawn();
+            continue;
+        }
+        bg.0.set_alpha(f.alpha * (f.life / f.max_life).powi(2));
     }
 }
 
@@ -210,35 +238,36 @@ fn apply_shake(
 
 fn particle_bundle(art: &Art, pos: Vec3, p: Particle) -> impl Bundle {
     (
-        Mesh2d(art.quad.clone()),
+        Mesh3d(art.quad.clone()),
         Transform::from_translation(pos).with_scale(p.size.0.extend(1.0)),
         p,
+        NotShadowCaster,
+        NotShadowReceiver,
         DespawnOnExit(AppState::Playing),
     )
 }
 
 /// A fiery explosion. `size` is roughly the radius of the destroyed object.
-pub fn explosion(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec2, size: f32, ground: bool) {
+pub fn explosion(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec3, size: f32, ground: bool) {
     let s = (size / 24.0).clamp(0.5, 6.0);
-    let z = if ground { z::SCORCH + 0.5 } else { z::FX };
+    let base = pos.truncate();
+    let z = pos.z + 6.0;
 
     // Bright central flash.
     let mut flash = Particle::new(Vec2::ZERO, 0.18, Vec2::splat(70.0 * s), LinearRgba::rgb(9.0, 6.0, 3.0));
     flash.size.1 = Vec2::splat(150.0 * s);
-    commands.spawn(particle_bundle(art, pos.extend(z + 0.3), flash));
+    commands.spawn(particle_bundle(art, base.extend(z + 3.0), flash));
 
     // Fireballs.
-    let n = (6.0 + 5.0 * s) as usize;
-    for _ in 0..n {
+    for _ in 0..(6.0 + 5.0 * s) as usize {
         let vel = rng.dir() * rng.range(30.0, 170.0) * s.sqrt();
-        let life = rng.range(0.35, 0.8);
         let r = rng.range(22.0, 40.0) * s.sqrt();
-        let mut p = Particle::new(vel, life, Vec2::splat(r), LinearRgba::rgb(5.0, 2.6, 0.6));
+        let mut p = Particle::new(vel, rng.range(0.35, 0.8), Vec2::splat(r), LinearRgba::rgb(5.0, 2.6, 0.6));
         p.size.1 = Vec2::splat(r * 1.8);
         p.color.1 = LinearRgba::new(0.6, 0.08, 0.02, 0.0);
         p.drag = 3.0;
         p.grounded = ground;
-        commands.spawn(particle_bundle(art, (pos + rng.in_disc(8.0 * s)).extend(z + 0.2), p));
+        commands.spawn(particle_bundle(art, (base + rng.in_disc(8.0 * s)).extend(z + 2.0), p));
     }
 
     // Sparks.
@@ -248,18 +277,19 @@ pub fn explosion(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec2, s
         p.size.1 = Vec2::new(2.0, 8.0);
         p.drag = 4.0;
         p.align = true;
-        commands.spawn(particle_bundle(art, pos.extend(z + 0.4), p.tex(FxTex::Streak)));
+        commands.spawn(particle_bundle(art, base.extend(z + 4.0), p.tex(FxTex::Streak)));
     }
 
-    // Smoke.
+    // Billowing smoke.
     for _ in 0..(3.0 + 2.0 * s) as usize {
         let vel = rng.dir() * rng.range(10.0, 60.0);
         let r = rng.range(30.0, 50.0) * s.sqrt();
-        let mut p = Particle::new(vel, rng.range(0.9, 1.6), Vec2::splat(r), LinearRgba::new(0.12, 0.11, 0.1, 0.55));
-        p.size.1 = Vec2::splat(r * 2.2);
+        let mut p = Particle::new(vel, rng.range(0.9, 1.7), Vec2::splat(r), LinearRgba::new(0.16, 0.14, 0.13, 0.7));
+        p.size.1 = Vec2::splat(r * 2.3);
         p.drag = 1.0;
         p.grounded = true;
-        commands.spawn(particle_bundle(art, (pos + rng.in_disc(10.0 * s)).extend(z), p));
+        p.spin = rng.range(-0.8, 0.8);
+        commands.spawn(particle_bundle(art, (base + rng.in_disc(10.0 * s)).extend(z), p.tex(FxTex::Smoke).blended()));
     }
 
     // Debris chunks.
@@ -270,72 +300,110 @@ pub fn explosion(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec2, s
         p.spin = rng.range(-12.0, 12.0);
         p.drag = 2.5;
         p.size.1 = Vec2::splat(d * 0.6);
-        commands.spawn(particle_bundle(art, pos.extend(z + 0.1), p.tex(FxTex::Solid)));
+        commands.spawn(particle_bundle(art, base.extend(z + 1.0), p.tex(FxTex::Solid).blended()));
     }
 
     // Shockwave ring for larger blasts.
     if s >= 1.2 {
         let mut p = Particle::new(Vec2::ZERO, 0.4, Vec2::splat(30.0 * s), LinearRgba::new(2.0, 1.6, 1.2, 0.8));
         p.size.1 = Vec2::splat(260.0 * s.sqrt());
-        commands.spawn(particle_bundle(art, pos.extend(z + 0.5), p.tex(FxTex::Ring)));
+        commands.spawn(particle_bundle(art, base.extend(z + 5.0), p.tex(FxTex::Ring)));
     }
 
     // Burnt patch left on the ground.
     if ground {
         commands.spawn((
-            Sprite {
-                image: art.tex_glow.clone(),
-                custom_size: Some(Vec2::splat(70.0 * s)),
-                color: Color::srgba(0.05, 0.04, 0.03, 0.6),
-                ..default()
-            },
-            Transform::from_translation(pos.extend(z::SCORCH)),
+            Mesh3d(art.quad.clone()),
+            MeshMaterial3d(art.mat_scorch.clone()),
+            Transform::from_translation(base.extend(pos.z + 1.5)).with_scale(Vec3::splat(70.0 * s)),
             Scrolls,
             Offscreen::new(150.0),
+            NotShadowCaster,
+            NotShadowReceiver,
             DespawnOnExit(AppState::Playing),
         ));
     }
 }
 
 /// Small spray of sparks where a bullet hits.
-pub fn hit_sparks(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec2, color: LinearRgba) {
+pub fn hit_sparks(commands: &mut Commands, art: &Art, rng: &mut Rng, pos: Vec3, color: LinearRgba) {
     for _ in 0..3 {
         let vel = (Vec2::Y + rng.dir() * 0.9).normalize_or_zero() * rng.range(120.0, 320.0);
         let mut p = Particle::new(vel, rng.range(0.1, 0.22), Vec2::new(4.0, 14.0), color);
         p.align = true;
         p.drag = 5.0;
-        commands.spawn(particle_bundle(art, pos.extend(z::FX), p.tex(FxTex::Streak)));
+        commands.spawn(particle_bundle(art, pos, p.tex(FxTex::Streak)));
     }
     let mut glow = Particle::new(Vec2::ZERO, 0.08, Vec2::splat(26.0), color);
     glow.size.1 = Vec2::splat(10.0);
-    commands.spawn(particle_bundle(art, pos.extend(z::FX), glow));
+    commands.spawn(particle_bundle(art, pos, glow));
 }
 
 /// Generic glowing puff, e.g. muzzle flashes, pickup sparkles and trails.
-pub fn puff(commands: &mut Commands, art: &Art, pos: Vec2, vel: Vec2, life: f32, size: (f32, f32), color: LinearRgba) {
+pub fn puff(commands: &mut Commands, art: &Art, pos: Vec3, vel: Vec2, life: f32, size: (f32, f32), color: LinearRgba) {
     let mut p = Particle::new(vel, life, Vec2::splat(size.0), color);
     p.size.1 = Vec2::splat(size.1);
     p.drag = 1.5;
-    commands.spawn(particle_bundle(art, pos.extend(z::FX - 1.0), p));
+    commands.spawn(particle_bundle(art, pos, p));
+}
+
+/// Soft grey smoke puff (missile trails, damaged bosses).
+pub fn smoke_puff(commands: &mut Commands, art: &Art, pos: Vec3, vel: Vec2, life: f32, size: (f32, f32), alpha: f32) {
+    let mut p = Particle::new(vel, life, Vec2::splat(size.0), LinearRgba::new(0.8, 0.8, 0.82, alpha));
+    p.size.1 = Vec2::splat(size.1);
+    p.drag = 1.5;
+    commands.spawn(particle_bundle(art, pos, p.tex(FxTex::Smoke).blended()));
+}
+
+/// White water: wakes, splashes and whale spouts. Drifts with the sea.
+pub fn foam(commands: &mut Commands, art: &Art, pos: Vec3, vel: Vec2, life: f32, size: (f32, f32), alpha: f32) {
+    let mut p = Particle::new(vel, life, Vec2::splat(size.0), LinearRgba::new(1.0, 1.0, 1.0, alpha));
+    p.size.1 = Vec2::splat(size.1);
+    p.drag = 1.2;
+    p.grounded = true;
+    p.spin = 0.4;
+    commands.spawn(particle_bundle(art, pos, p.tex(FxTex::Smoke).blended()));
+}
+
+/// Expanding ripple on the sea surface that drifts with the water.
+pub fn ripple(commands: &mut Commands, art: &Art, pos: Vec3, from: f32, to: f32, life: f32, alpha: f32) {
+    let mut p = Particle::new(Vec2::ZERO, life, Vec2::splat(from), LinearRgba::new(1.0, 1.0, 1.0, alpha));
+    p.size.1 = Vec2::splat(to);
+    p.grounded = true;
+    commands.spawn(particle_bundle(art, pos, p.tex(FxTex::Ring).blended()));
 }
 
 /// Expanding ring, e.g. for bombs and power-up pickups.
-pub fn shockwave(commands: &mut Commands, art: &Art, pos: Vec2, from: f32, to: f32, life: f32, color: LinearRgba) {
+pub fn shockwave(commands: &mut Commands, art: &Art, pos: Vec3, from: f32, to: f32, life: f32, color: LinearRgba) {
     let mut p = Particle::new(Vec2::ZERO, life, Vec2::splat(from), color);
     p.size.1 = Vec2::splat(to);
-    commands.spawn(particle_bundle(art, pos.extend(z::FX + 1.0), p.tex(FxTex::Ring)));
+    commands.spawn(particle_bundle(art, pos, p.tex(FxTex::Ring)));
 }
 
-pub fn floating_text(commands: &mut Commands, pos: Vec2, text: impl Into<String>, color: Color, size: f32) {
+/// Score or label that pops up in the world and floats away.
+pub fn floating_text(commands: &mut Commands, pos: Vec3, text: impl Into<String>, color: Color, size: f32) {
     commands.spawn((
-        Text2d::new(text),
+        Text::new(text),
         TextFont {
             font_size: FontSize::Px(size),
             ..default()
         },
         TextColor(color),
-        Transform::from_translation(pos.extend(z::TEXT)),
+        TextShadow {
+            offset: Vec2::new(0.0, 2.0),
+            color: Color::srgba(0.0, 0.0, 0.0, 0.5),
+        },
+        TextLayout::justify(Justify::Center),
+        Node {
+            position_type: PositionType::Absolute,
+            width: px(300),
+            left: px(-1000),
+            ..default()
+        },
+        UiTransform::default(),
+        Pickable::IGNORE,
         FloatingText {
+            world: pos,
             life: 0.9,
             max_life: 0.9,
         },
@@ -343,8 +411,21 @@ pub fn floating_text(commands: &mut Commands, pos: Vec2, text: impl Into<String>
     ));
 }
 
-pub fn screen_flash(commands: &mut Commands, art: &Art, color: Color, alpha: f32, life: f32) {
-    let mut p = Particle::new(Vec2::ZERO, life, Vec2::splat(4000.0), color.to_linear().with_alpha(alpha));
-    p.real_time = true;
-    commands.spawn(particle_bundle(art, Vec3::new(0.0, 0.0, z::FLASH), p.tex(FxTex::Solid)));
+pub fn screen_flash(commands: &mut Commands, color: Color, alpha: f32, life: f32) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: percent(100),
+            height: percent(100),
+            ..default()
+        },
+        BackgroundColor(color.with_alpha(alpha)),
+        GlobalZIndex(5),
+        Pickable::IGNORE,
+        ScreenFlash {
+            life,
+            max_life: life,
+            alpha,
+        },
+    ));
 }

@@ -79,6 +79,34 @@ impl Run {
     }
 }
 
+/// Smooth pausing: a pause request first eases the game into slow motion
+/// (while the dark mask fades in), then pauses. Resuming ramps back up.
+#[derive(Resource)]
+pub struct PauseFlow {
+    pub requested: bool,
+    /// Game speed, 0..1.
+    pub speed: f32,
+    /// How far the pause mask has faded in, 0..1.
+    pub mask: f32,
+}
+
+impl Default for PauseFlow {
+    fn default() -> Self {
+        Self {
+            requested: false,
+            speed: 1.0,
+            mask: 0.0,
+        }
+    }
+}
+
+impl PauseFlow {
+    /// Whether the player is actively flying (not pausing, paused or in menus).
+    pub fn flying(&self) -> bool {
+        !self.requested && self.speed > 0.99
+    }
+}
+
 pub struct StatePlugin;
 
 impl Plugin for StatePlugin {
@@ -86,13 +114,15 @@ impl Plugin for StatePlugin {
         app.init_state::<AppState>()
             .add_sub_state::<PlayState>()
             .init_resource::<Run>()
+            .init_resource::<PauseFlow>()
+            .add_systems(OnEnter(AppState::Playing), reset_flow)
             .add_systems(OnEnter(PlayState::Paused), pause_time)
             .add_systems(OnExit(PlayState::Paused), resume_time)
-            .add_systems(OnExit(AppState::Playing), resume_time)
+            .add_systems(OnExit(AppState::Playing), (resume_time, reset_flow))
             .add_systems(
                 Update,
                 (
-                    toggle_pause.run_if(in_state(AppState::Playing)),
+                    (toggle_pause, pause_on_focus_loss, pause_flow).chain().run_if(in_state(AppState::Playing)),
                     finish_run.run_if(in_state(PlayState::Running)),
                 ),
             );
@@ -103,26 +133,80 @@ fn pause_time(mut time: ResMut<Time<Virtual>>) {
     time.pause();
 }
 
-fn resume_time(mut time: ResMut<Time<Virtual>>) {
+fn resume_time(mut time: ResMut<Time<Virtual>>, mut flow: ResMut<PauseFlow>) {
     time.unpause();
+    flow.requested = false;
+}
+
+fn reset_flow(mut time: ResMut<Time<Virtual>>, mut flow: ResMut<PauseFlow>) {
+    *flow = PauseFlow::default();
+    time.set_relative_speed(1.0);
+}
+
+/// Eases the game speed down towards a pause, or back up after resuming.
+fn pause_flow(
+    real: Res<Time<Real>>,
+    mut time: ResMut<Time<Virtual>>,
+    state: Option<Res<State<PlayState>>>,
+    mut next: ResMut<NextState<PlayState>>,
+    mut flow: ResMut<PauseFlow>,
+) {
+    let Some(state) = state else { return };
+    let dt = real.delta_secs().min(0.1);
+    let paused = *state.get() == PlayState::Paused;
+    if !paused {
+        if flow.requested {
+            flow.speed = (flow.speed - dt * 2.8).max(0.0);
+            if flow.speed <= 0.06 {
+                next.set(PlayState::Paused);
+            }
+        } else {
+            flow.speed = (flow.speed + dt * 2.5).min(1.0);
+        }
+        time.set_relative_speed(flow.speed.max(0.05));
+    }
+    let target = if flow.requested || paused { 1.0 } else { 0.0 };
+    let step = dt * 3.5;
+    flow.mask += (target - flow.mask).clamp(-step, step);
+}
+
+/// Pause when the window or browser tab loses focus.
+fn pause_on_focus_loss(
+    mut focus: MessageReader<bevy::window::WindowFocused>,
+    run: Res<Run>,
+    god: Res<crate::combat::GodMode>,
+    mut flow: ResMut<PauseFlow>,
+    mut had_focus: Local<bool>,
+) {
+    for ev in focus.read() {
+        if ev.focused {
+            *had_focus = true;
+        } else if *had_focus && run.outcome.is_none() && !god.0 {
+            // Only once the game has actually had focus: a window or page that
+            // starts out unfocused shouldn't pause straight away.
+            flow.requested = true;
+        }
+    }
 }
 
 fn toggle_pause(
     keys: Res<ButtonInput<KeyCode>>,
     pads: Query<&Gamepad>,
-    state: Res<State<PlayState>>,
+    state: Option<Res<State<PlayState>>>,
     run: Res<Run>,
+    mut flow: ResMut<PauseFlow>,
     mut next: ResMut<NextState<PlayState>>,
 ) {
+    let Some(state) = state else { return };
     let pad_start = pads.iter().any(|p| p.just_pressed(GamepadButton::Start));
     if run.outcome.is_some() {
         return;
     }
     if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::KeyP) || pad_start {
-        next.set(match state.get() {
-            PlayState::Running => PlayState::Paused,
-            PlayState::Paused => PlayState::Running,
-        });
+        match state.get() {
+            PlayState::Running => flow.requested = !flow.requested,
+            PlayState::Paused => next.set(PlayState::Running),
+        }
     }
 }
 
