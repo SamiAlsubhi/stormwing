@@ -191,7 +191,8 @@ fn run_director(
     director.rng.0 = Some(island_rng);
 }
 
-/// Jumps the director forward (used by the dev harness).
+/// Jumps the director forward (used by the dev harness, which is desktop-only).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn skip_to(director: &mut Director, t: f32) {
     while director.next < director.events.len() && director.events[director.next].0 < t {
         director.next += 1;
