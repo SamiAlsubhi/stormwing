@@ -31,6 +31,14 @@ if command -v wasm-opt >/dev/null 2>&1 && [ "$PROFILE" != "dev" ]; then
     || echo "wasm-opt failed; keeping the unoptimised binary"
 fi
 
+# Give this build's files unique names so a browser can never pair a cached
+# loader from one build with the game binary from another. The page reads
+# version.json (always fetched fresh) to find them.
+HASH=$(cat "$OUT/stormwing_bg.wasm" "$OUT/stormwing.js" | { sha1sum 2>/dev/null || shasum; } | cut -c1-12)
+mv "$OUT/stormwing.js" "$OUT/stormwing-$HASH.js"
+mv "$OUT/stormwing_bg.wasm" "$OUT/stormwing-$HASH.wasm"
+printf '{"build":"%s"}\n' "$HASH" > "$OUT/version.json"
+
 cp web/index.html "$OUT/"
 touch "$OUT/.nojekyll"
 ls -lh "$OUT"

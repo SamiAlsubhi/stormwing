@@ -58,10 +58,27 @@
     #fill { width: 0; height: 100%; background: #73d0ff; transition: width 0.15s; }
     #status { min-height: 1.2em; font-size: 14px; color: rgba(255, 255, 255, 0.7); }
     #help { max-width: 440px; font-size: 13px; line-height: 1.6; color: rgba(255, 255, 255, 0.5); }
+    #errors {
+      position: fixed;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      max-height: 40vh;
+      overflow: auto;
+      padding: 10px;
+      border-radius: 8px;
+      background: rgba(60, 0, 0, 0.88);
+      color: #ffd2d2;
+      font: 11px/1.4 ui-monospace, Menlo, monospace;
+      white-space: pre-wrap;
+      z-index: 10;
+    }
+    #errors[hidden] { display: none; }
   </style>
 </head>
 <body>
   <canvas id="stormwing" tabindex="0"></canvas>
+  <div id="errors" hidden></div>
   <div id="overlay">
     <h1>STORMWING</h1>
     <div class="tag">ARCADE SKY COMBAT</div>
@@ -72,8 +89,30 @@
       Keyboard: WASD / arrows to fly, Space to bomb, Esc to pause, M to mute.
     </div>
   </div>
+  <script>
+    // Show errors on screen, so problems on phones can be reported.
+    (() => {
+      const box = () => document.getElementById('errors');
+      const show = (msg) => {
+        const text = String(msg);
+        // winit stops the event loop by throwing; that one is expected.
+        if (text.includes('Using exceptions for control flow')) return;
+        const el = box();
+        if (!el) return;
+        el.hidden = false;
+        el.textContent += text.slice(0, 1500) + '\n\n';
+      };
+      const original = console.error.bind(console);
+      console.error = (...args) => { original(...args); show(args.map(String).join(' ')); };
+      window.addEventListener('error', (e) => show(e.message || e.error));
+      window.addEventListener('unhandledrejection', (e) => show(e.reason));
+    })();
+  </script>
   <script type="module">
-    import init from './stormwing.js';
+    // Each build has uniquely named files; version.json (never cached) says
+    // which ones belong together.
+    const { build } = await (await fetch(`./version.json?t=${Date.now()}`, { cache: 'no-store' })).json();
+    const { default: init } = await import(`./stormwing-${build}.js`);
 
     // Phones only let a page start audio from inside a touch, click or key
     // press. So the game's AudioContext is created right here, on the first
@@ -127,7 +166,7 @@
     // Download and compile the game first, then wait for a tap: browsers only
     // let a page start audio in response to a user gesture.
     async function load() {
-      const response = await fetch('./stormwing_bg.wasm');
+      const response = await fetch(`./stormwing-${build}.wasm`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const total = Number(response.headers.get('content-length')) || 0;
       const reader = response.body.getReader();
@@ -155,13 +194,19 @@
 
     try {
       const module = await load();
-      status.textContent = 'Starting...';
-      // Go straight into the game. Sound starts on the first touch or key
-      // press, as browsers require.
-      setTimeout(() => {
+      status.textContent = 'Preparing graphics...';
+      // Keep this screen up until the game has drawn its first frames (phones
+      // can take a while to compile the 3D shaders), then go straight in.
+      // Sound starts on the first touch or key press, as browsers require.
+      let shown = false;
+      const reveal = () => {
+        if (shown) return;
+        shown = true;
         overlay.style.opacity = '0';
         setTimeout(() => overlay.remove(), 700);
-      }, 400);
+      };
+      window.stormwingReady = reveal;
+      setTimeout(reveal, 45000);
       canvas.focus();
       try {
         await init({ module_or_path: module });

@@ -76,16 +76,35 @@ fn main() {
             touch::TouchPlugin,
             voice::VoicePlugin,
         ))
-        .insert_resource(DirectionalLightShadowMap { size: 2048 })
+        .insert_resource(DirectionalLightShadowMap {
+            size: if cfg!(target_arch = "wasm32") { 1024 } else { 2048 },
+        })
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.72, 0.8, 1.0),
             brightness: 420.0,
             ..default()
         })
         .add_systems(Startup, spawn_camera);
+    #[cfg(target_arch = "wasm32")]
+    app.add_systems(Update, signal_ready);
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(dev::DevPlugin);
     app.run();
+}
+
+/// Lets the web page hide its loading screen once frames are being drawn.
+#[cfg(target_arch = "wasm32")]
+fn signal_ready(mut frames: Local<u32>) {
+    *frames += 1;
+    if *frames == 6 {
+        if let Some(window) = web_sys::window() {
+            if let Ok(f) = js_sys::Reflect::get(&window, &"stormwingReady".into()) {
+                if let Ok(f) = wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f) {
+                    let _ = f.call0(&window);
+                }
+            }
+        }
+    }
 }
 
 fn spawn_camera(mut commands: Commands, art: Res<art::Art>) {

@@ -1135,7 +1135,9 @@ fn spawn_island_entity(
             NotShadowReceiver,
             ChildOf(id),
         ));
-        // A real warm light that washes over the island and the water.
+        // A real warm light that washes over the island and the water
+        // (desktop only: it keeps the web build's shaders lighter).
+        #[cfg(not(target_arch = "wasm32"))]
         commands.spawn((
             PointLight {
                 color: Color::srgb(1.0, 0.85, 0.6),
