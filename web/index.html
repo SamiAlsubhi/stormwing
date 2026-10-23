@@ -99,23 +99,107 @@
         if (text.includes('Using exceptions for control flow')) return;
         const el = box();
         if (!el) return;
-        el.hidden = false;
+        if (el.hidden) {
+          el.hidden = false;
+          const gpu = window.stormwingGpu;
+          el.textContent = `${navigator.userAgent}\nGPU: ${gpu ? `${gpu.vendor} ${gpu.architecture}` : 'unknown'}\n\n`;
+        }
         el.textContent += text.slice(0, 1500) + '\n\n';
       };
+      window.stormwingShowError = show;
       const original = console.error.bind(console);
       console.error = (...args) => { original(...args); show(args.map(String).join(' ')); };
+      // The game logs its own errors through console.log, as
+      // "%cERROR%c <file:line>%c <message>" followed by style strings.
+      const log = console.log.bind(console);
+      console.log = (...args) => {
+        log(...args);
+        const first = String(args[0]);
+        if (first.startsWith('%cERROR')) show(first.replace(/%c/g, ' ').replace(/ \/\S*\/(src\/\S+)/, ' $1').trim());
+      };
       window.addEventListener('error', (e) => show(e.message || e.error));
       window.addEventListener('unhandledrejection', (e) => show(e.reason));
+    })();
+  </script>
+  <script>
+    // WebGPU support code.
+    (() => {
+      if (!window.GPUDevice) return;
+      const show = (msg) => window.stormwingShowError && window.stormwingShowError(msg);
+
+      // Bevy's PBR shaders put textures and samplers in `let` variables
+      // (`let texture = base_color_texture;`). Chrome accepts that, but
+      // Safari's shader compiler doesn't, so before a shader is compiled,
+      // each such `let` is removed and its uses are replaced with the
+      // texture or sampler itself, which means exactly the same thing.
+      const patchShader = (code) => {
+        const handles = new Set();
+        for (const m of code.matchAll(/\bvar\s+([A-Za-z_]\w*)\s*:\s*(?:texture_|sampler)/g)) handles.add(m[1]);
+        if (!handles.size) return code;
+        const lines = code.split('\n');
+        const decl = /^\s*let\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*;\s*$/;
+        for (let i = 0; i < lines.length; i++) {
+          const m = lines[i].match(decl);
+          if (!m || !handles.has(m[2])) continue;
+          const [, name, handle] = m;
+          lines[i] = '';
+          const use = new RegExp(`(?<![\\w.])${name}(?!\\w)`, 'g');
+          const redeclared = new RegExp(`^\\s*let\\s+${name}\\b`);
+          // Replace uses until the end of the enclosing block.
+          let depth = 0;
+          for (let j = i + 1; j < lines.length; j++) {
+            if (redeclared.test(lines[j])) break;
+            let end = lines[j].length;
+            for (let k = 0; k < lines[j].length; k++) {
+              const c = lines[j][k];
+              if (c === '{') depth++;
+              else if (c === '}' && --depth < 0) { end = k; break; }
+            }
+            lines[j] = lines[j].slice(0, end).replace(use, handle) + lines[j].slice(end);
+            if (depth < 0) break;
+          }
+        }
+        return lines.join('\n');
+      };
+
+      const createShaderModule = GPUDevice.prototype.createShaderModule;
+      GPUDevice.prototype.createShaderModule = function (descriptor) {
+        const code = descriptor && typeof descriptor.code === 'string' ? patchShader(descriptor.code) : null;
+        const module = createShaderModule.call(this, code === null ? descriptor : { ...descriptor, code });
+        // Report shader compile errors with the offending line.
+        if (module.getCompilationInfo) {
+          module.getCompilationInfo().then((info) => {
+            const lines = (code || '').split('\n');
+            for (const e of info.messages.filter((m) => m.type === 'error').slice(0, 3)) {
+              show(`Shader error at line ${e.lineNum}: ${e.message}\n  ${(lines[e.lineNum - 1] || '').trim()}`);
+            }
+          }).catch(() => {});
+        }
+        return module;
+      };
+
+      // Report GPU errors and a lost GPU device on screen too.
+      const requestDevice = GPUAdapter.prototype.requestDevice;
+      GPUAdapter.prototype.requestDevice = async function (...args) {
+        const device = await requestDevice.apply(this, args);
+        device.addEventListener('uncapturederror', (e) => show(`WebGPU error: ${e.error && e.error.message}`));
+        device.lost.then((info) => {
+          if (info.reason !== 'destroyed') show(`WebGPU device lost: ${info.message}`);
+        });
+        return device;
+      };
     })();
   </script>
   <script type="module">
     // The game draws with WebGPU. Browsers without it can't run it, so check
     // first and explain, rather than download the game for nothing.
+    const adapter = navigator.gpu && (await navigator.gpu.requestAdapter().catch(() => null));
     if (!navigator.gpu) {
       unsupported('This browser doesn\u2019t support WebGPU, which Stormwing needs for its 3D graphics.');
-    } else if (!(await navigator.gpu.requestAdapter().catch(() => null))) {
+    } else if (!adapter) {
       unsupported('WebGPU is turned off in this browser, or this device\u2019s graphics can\u2019t use it.');
     } else {
+      window.stormwingGpu = adapter.info;
       await run();
     }
 
